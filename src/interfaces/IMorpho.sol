@@ -66,7 +66,9 @@ interface IMorpho {
         uint256 shares,
         address onBehalf,
         bytes memory data
-    ) external returns (uint256 supplyAssets, uint256 supplyShares);
+    )
+        external
+        returns (uint256 supplyAssets, uint256 supplyShares);
 
     /// @notice Withdraws assets from a market
     /// @param marketParams The market parameters
@@ -82,7 +84,9 @@ interface IMorpho {
         uint256 shares,
         address onBehalf,
         address receiver
-    ) external returns (uint256 withdrawnAssets, uint256 withdrawnShares);
+    )
+        external
+        returns (uint256 withdrawnAssets, uint256 withdrawnShares);
 
     /// @notice Borrows assets from a market
     /// @param marketParams The market parameters
@@ -98,7 +102,9 @@ interface IMorpho {
         uint256 shares,
         address onBehalf,
         address receiver
-    ) external returns (uint256 borrowedAssets, uint256 borrowedShares);
+    )
+        external
+        returns (uint256 borrowedAssets, uint256 borrowedShares);
 
     /// @notice Repays a borrow position
     /// @param marketParams The market parameters
@@ -114,7 +120,9 @@ interface IMorpho {
         uint256 shares,
         address onBehalf,
         bytes memory data
-    ) external returns (uint256 repaidAssets, uint256 repaidShares);
+    )
+        external
+        returns (uint256 repaidAssets, uint256 repaidShares);
 
     /// @notice Returns the expected supply assets for a user in a market
     /// @param marketParams The market parameters
@@ -134,13 +142,13 @@ interface IMorpho {
     /// @return totalSupplyShares The expected total supply shares
     /// @return totalBorrowAssets The expected total borrow assets
     /// @return totalBorrowShares The expected total borrow shares
-    function expectedMarketBalances(MarketParams memory marketParams) 
-        external 
-        view 
+    function expectedMarketBalances(MarketParams memory marketParams)
+        external
+        view
         returns (
-            uint256 totalSupplyAssets, 
-            uint256 totalSupplyShares, 
-            uint256 totalBorrowAssets, 
+            uint256 totalSupplyAssets,
+            uint256 totalSupplyShares,
+            uint256 totalBorrowAssets,
             uint256 totalBorrowShares
         );
 }
