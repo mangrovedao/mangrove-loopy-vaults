@@ -1,2 +1,3 @@
 @openzeppelin-contracts/=dependencies/@openzeppelin-contracts-5.3.0/
-forge-std-1.9.6/=dependencies/forge-std-1.9.6/
+forge-std/=dependencies/forge-std-1.9.6/src/
+morpho-org-morpho-blue/=dependencies/morpho-org-morpho-blue-1.0.0/

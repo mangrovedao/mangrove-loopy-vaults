@@ -33,7 +33,7 @@ interface IAavePool {
     /// @notice Repays a borrowed amount of asset
     /// @param asset The address of the borrowed underlying asset
     /// @param amount The amount to be repaid (type(uint256).max for everything)
-    /// @param interestRateMode The interest rate mode (1 for stable, 2 for variable)
+    /// @param rateMode The interest rate mode (1 for stable, 2 for variable)
     /// @param onBehalfOf The address of the user who will get his debt reduced
     /// @return The final amount repaid
     function repay(address asset, uint256 amount, uint256 rateMode, address onBehalfOf) external returns (uint256);

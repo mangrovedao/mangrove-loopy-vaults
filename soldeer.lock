@@ -11,3 +11,10 @@ version = "1.9.6"
 url = "https://soldeer-revisions.s3.amazonaws.com/forge-std/1_9_6_01-02-2025_20:49:10_forge-std-1.9.zip"
 checksum = "55f341818321b3f925161a72fd0dcd62e4a0a4b66785a7a932bf2bfaf96fb9d1"
 integrity = "e9ecdc364d152157431e5df5aa041ffddbe9bb1c1ad81634b1e72df9e23814e8"
+
+[[dependencies]]
+name = "morpho-org-morpho-blue"
+version = "1.0.0"
+url = "https://soldeer-revisions.s3.amazonaws.com/morpho-org-morpho-blue/1_0_0_09-04-2025_08:34:25_morpho-org-morpho-blue-1.0.zip"
+checksum = "2c0bc5a67138c0ea303bd57bf94a15a77b889fe3c35e14a814d5ca2369f6a24e"
+integrity = "05ea7e131b210857ac5951580455f27a772efdcaebfd3dcdaaf63d4dedb08f8f"

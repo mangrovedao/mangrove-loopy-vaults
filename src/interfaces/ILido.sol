@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.13;
+
 /// @title ILido
 /// @notice Interface for Lido's stETH staking contract
 interface ILido {
