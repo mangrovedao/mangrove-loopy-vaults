@@ -9,6 +9,14 @@ interface IAerodromeRouter {
         address factory;
     }
 
+    /// @notice Fetch the pool address for a given token pair and stability
+    /// @param tokenA       .
+    /// @param tokenB       .
+    /// @param stable       True if pool is stable, false if volatile
+    /// @param _factory     Address of PoolFactory for tokenA and tokenB
+    /// @return pool        Address of the pool
+    function poolFor(address tokenA, address tokenB, bool stable, address _factory) external view returns (address pool);
+
     /// @notice Fetch and sort the reserves for a pool
     /// @param tokenA       .
     /// @param tokenB       .

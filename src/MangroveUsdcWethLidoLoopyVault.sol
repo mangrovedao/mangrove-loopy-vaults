@@ -1,8 +1,7 @@
-    // SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.13;
 
 import { IAavePool } from "./interfaces/IAavePool.sol";
-import { ILido } from "./interfaces/ILido.sol";
 import { IERC20, SafeERC20 } from "@openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin-contracts/utils/math/Math.sol";
 
@@ -66,6 +65,15 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @param newSwapModule Address of the new swap module
     event SetSwapModule(address indexed sender, address indexed newSwapModule);
 
+    /// @notice Emitted when price oracle addresses are updated
+    /// @param ethUsdOracle New ETH/USD oracle address
+    /// @param stEthEthOracle New stETH/ETH oracle address
+    event SetPriceOracles(address indexed ethUsdOracle, address indexed stEthEthOracle);
+
+    /// @notice Emitted when the price staleness tolerance is updated
+    /// @param newStaleness New staleness tolerance in seconds
+    event SetPriceStaleness(uint256 newStaleness);
+
     // In the errors section, add:
     /// @notice Thrown when trying to set an LTV that's too high
     error MorphoLtvTooHigh();
@@ -92,11 +100,6 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Thrown when a price feed returns a negative price
     error NegativePrice();
 
-    /// @notice Emitted when price oracle addresses are updated
-    /// @param ethUsdOracle New ETH/USD oracle address
-    /// @param stEthEthOracle New stETH/ETH oracle address
-    event SetPriceOracles(address indexed ethUsdOracle, address indexed stEthEthOracle);
-
     /* STORAGE */
 
     /// @notice Address of the USDC token
@@ -107,9 +110,6 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
 
     /// @notice Address of the stETH token from Lido
     IERC20 public immutable stEth;
-
-    /// @notice Lido staking contract for ETH
-    ILido public immutable lido;
 
     /// @notice Aave lending pool contract
     IAavePool public immutable aavePool;
@@ -147,8 +147,8 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Maximum allowed LTV for Morpho borrowing
     uint256 public constant MAX_MORPHO_LTV = 80; // 80%
 
-    /// @notice Maximum price feed staleness allowed (1 hour)
-    uint256 public constant MAX_PRICE_STALENESS = 1 hours;
+    /// @notice Maximum price feed staleness allowed (upgradeable)
+    uint256 public maxPriceStaleness;
 
     /// @notice Current number of loop iterations active
     uint256 public currentIterations;
@@ -186,7 +186,6 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         uint256 initialTimelock;
         address usdc;
         address weth;
-        address lido;
         address stEth;
         address aavePool;
         address morpho;
@@ -200,6 +199,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         uint256 morphoLtv;
         address ethUsdPriceFeed;
         address stEthEthPriceFeed;
+        uint256 maxPriceStaleness;
     }
 
     constructor(VaultParams memory params)
@@ -212,10 +212,10 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         require(params.morphoLtv <= MAX_MORPHO_LTV, "Morpho LTV too high");
         require(params.ethUsdPriceFeed != address(0), "Zero ETH/USD oracle");
         require(params.stEthEthPriceFeed != address(0), "Zero stETH/ETH oracle");
+        require(params.maxPriceStaleness > 0, "Zero max price staleness");
 
         usdc = IERC20(params.usdc);
         weth = IERC20(params.weth);
-        lido = ILido(params.lido);
         stEth = IERC20(params.stEth);
         aavePool = IAavePool(params.aavePool);
         morpho = IMorpho(params.morpho);
@@ -229,6 +229,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
 
         ethUsdPriceFeed = IAggregatorV3Interface(params.ethUsdPriceFeed);
         stEthEthPriceFeed = IAggregatorV3Interface(params.stEthEthPriceFeed);
+        maxPriceStaleness = params.maxPriceStaleness;
 
         // Verify that the market exists and has the correct tokens
         MarketParams memory marketParams = morpho.idToMarketParams(morphoMarketId);
@@ -237,7 +238,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
 
         // Approve tokens for protocol interactions
         usdc.forceApprove(params.aavePool, type(uint256).max);
-        weth.forceApprove(params.lido, type(uint256).max);
+        weth.forceApprove(params.swapper, type(uint256).max);
         weth.forceApprove(params.aavePool, type(uint256).max);
         stEth.forceApprove(params.morpho, type(uint256).max);
         stEth.forceApprove(params.swapper, type(uint256).max);
@@ -302,6 +303,15 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         require(_targetLeverage <= MAX_LEVERAGE, "Target leverage too high");
         targetLeverage = _targetLeverage;
         emit SetTargetLeverage(_targetLeverage);
+    }
+
+    /// @notice Sets the maximum price staleness tolerance
+    /// @dev Only callable by the owner
+    /// @param _maxPriceStaleness New maximum price staleness in seconds
+    function setMaxPriceStaleness(uint256 _maxPriceStaleness) external onlyOwner {
+        require(_maxPriceStaleness > 0, "Zero max price staleness");
+        maxPriceStaleness = _maxPriceStaleness;
+        emit SetPriceStaleness(_maxPriceStaleness);
     }
 
     /// @inheritdoc BaseMangroveLoopyVault
@@ -501,15 +511,12 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
             // Step 1: Borrow WETH from Aave
             aavePool.borrow(address(weth), iterationBorrow, 2, 0, address(this));
 
-            // Step 2: Stake WETH in Lido to get stETH
-            uint256 stEthBefore = stEth.balanceOf(address(this));
-            lido.submit(iterationBorrow);
-            uint256 stEthReceived = stEth.balanceOf(address(this)) - stEthBefore;
+            // Step 2: Swap weth for steth
+            uint256 stEthReceived = swapper.swap(address(weth), address(stEth), iterationBorrow);
 
             // Step 3: Supply stETH to Morpho as collateral
-            MarketParams memory marketParams = morpho.idToMarketParams(morphoMarketId);
             (uint256 suppliedStEth,) = morpho.supply(
-                marketParams,
+                _morphoMarketParams,
                 stEthReceived,
                 0, // min shares
                 address(this),
@@ -517,13 +524,14 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
             );
 
             // Step 4: Borrow WETH from Morpho using stETH as collateral
-            uint256 morphoBorrowCapacity = _calculateBorrowCapacityMorpho(marketParams);
-            uint256 morphoBorrowAmount =
-                Math.min(morphoBorrowCapacity, (targetBorrowAmount - borrowedSoFar - iterationBorrow));
+            uint256 morphoBorrowAmount = Math.min(
+                _calculateBorrowCapacityMorpho(_morphoMarketParams),
+                (targetBorrowAmount - borrowedSoFar - iterationBorrow)
+            );
 
             if (morphoBorrowAmount > 0) {
                 (uint256 borrowedWeth,) = morpho.borrow(
-                    marketParams,
+                    _morphoMarketParams,
                     morphoBorrowAmount,
                     type(uint256).max, // max shares
                     address(this),
@@ -775,7 +783,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         ) = ethUsdPriceFeed.latestRoundData();
 
         // Check if the price is stale
-        if (block.timestamp - updatedAt > MAX_PRICE_STALENESS) revert StalePrice();
+        if (block.timestamp - updatedAt > maxPriceStaleness) revert StalePrice();
 
         // Check if price is positive
         if (price <= 0) revert NegativePrice();
@@ -802,7 +810,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         ) = stEthEthPriceFeed.latestRoundData();
 
         // Check if the price is stale
-        if (block.timestamp - updatedAt > MAX_PRICE_STALENESS) revert StalePrice();
+        if (block.timestamp - updatedAt > maxPriceStaleness) revert StalePrice();
 
         // Check if price is positive
         if (price <= 0) revert NegativePrice();

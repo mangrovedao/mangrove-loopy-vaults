@@ -27,10 +27,9 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     // Protocol addresses on Base
     address constant AAVE_POOL_BASE = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
     address constant MORPHO_BASE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
-    address constant LIDO_BASE = 0x1D0c5bDe1a25439B965FDCdfD46F4D3EF60F8D17;
     address constant AERODROME_FACTORY_BASE = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
     address constant AERODROME_ROUTER_BASE = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
-
+    address constant AERODROME_WETH_ST_ETH_POOL_BASE = 0xA6385c73961dd9C58db2EF0c4EB98cE4B60651e8;
     // Chainlink Price Feed addresses on Base
     address constant ETH_USD_PRICE_FEED_BASE = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
     address constant STETH_ETH_PRICE_FEED_BASE = 0x43a5C292A453A3bF3606fa856197f09D7B74251a;
@@ -64,7 +63,6 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             initialTimelock: INITIAL_TIMELOCK,
             usdc: USDC_BASE,
             weth: WETH_BASE,
-            lido: LIDO_BASE,
             stEth: WST_ETH_BASE,
             aavePool: AAVE_POOL_BASE,
             morpho: MORPHO_BASE,
@@ -77,20 +75,35 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             ghostbook: ghostbook,
             morphoLtv: MORPHO_LTV,
             ethUsdPriceFeed: ETH_USD_PRICE_FEED_BASE,
-            stEthEthPriceFeed: STETH_ETH_PRICE_FEED_BASE
+            stEthEthPriceFeed: STETH_ETH_PRICE_FEED_BASE,
+            maxPriceStaleness: type(uint256).max // prevents bug from fork
         });
 
         vault = new MangroveUsdcWethLidoLoopyVault(params);
+        _setUpLabels();
     }
 
-    // Additional test functions for MangroveUsdcWethLidoLoopyVaultTest contract
-
+    function _setUpLabels() internal {
+        vm.label(USDC_BASE, "USDC");
+        vm.label(WETH_BASE, "WETH");
+        vm.label(WST_ETH_BASE, "WST_ETH");
+        vm.label(AAVE_POOL_BASE, "AAVE_POOL");
+        vm.label(MORPHO_BASE, "MORPHO");
+        vm.label(AERODROME_FACTORY_BASE, "AERODROME_FACTORY");
+        vm.label(AERODROME_ROUTER_BASE, "AERODROME_ROUTER");
+        vm.label(ETH_USD_PRICE_FEED_BASE, "ETH_USD_PRICE_FEED");
+        vm.label(STETH_ETH_PRICE_FEED_BASE, "STETH_ETH_PRICE_FEED");
+        vm.label(address(ghostbook), "GHOSTBOOK");
+        vm.label(address(swapper), "SWAPPER");
+        vm.label(address(vault), "VAULT");
+        vm.label(AERODROME_WETH_ST_ETH_POOL_BASE, "AERODROME_WETH_ST_ETH_POOL");
+    }
+    
     function testMangroveUsdcWethLidoLoopyVault_InitialState() public {
         // Check that the vault was initialized with the correct values
         assertEq(address(vault.usdc()), USDC_BASE);
         assertEq(address(vault.weth()), WETH_BASE);
         assertEq(address(vault.stEth()), WST_ETH_BASE);
-        assertEq(address(vault.lido()), LIDO_BASE);
         assertEq(address(vault.aavePool()), AAVE_POOL_BASE);
         assertEq(address(vault.morpho()), MORPHO_BASE);
         assertEq(address(vault.swapper()), address(swapper));
@@ -221,11 +234,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         deal(USDC_BASE, users.alice, depositAmount);
 
         // Mock the vault to skip the looping strategy
-        vm.mockCall(
-            address(vault),
-            abi.encodeWithSignature("_executeLoopStrategy()"),
-            abi.encode()
-        );
+        vm.mockCall(address(vault), abi.encodeWithSignature("_executeLoopStrategy()"), abi.encode());
 
         // Approve and deposit
         vm.startPrank(users.alice);
@@ -250,17 +259,14 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         vm.warp(block.timestamp + INITIAL_TIMELOCK + 1);
 
         // Accept the guardian
-        vault.submitGuardian(users.charlie);
+        vm.prank(users.alice);
+        vault.submitGuardian(address(0));
 
         // Mock the unwind function to validate it's called
-        vm.mockCall(
-            address(vault), abi.encodeWithSignature("_unwindLoop()"),abi.encode(0)
-        );
+        vm.mockCall(address(vault), abi.encodeWithSignature("_unwindLoop()"), abi.encode(0));
 
         // Call emergencyUnwind as the guardian
         vm.prank(users.charlie);
         vault.emergencyUnwind();
-
-        // Verify that _unwindLoop was called (this is implicit in the mock setup)
     }
 }
