@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import { Ownable, Ownable2Step } from "@openzeppelin-contracts/access/Ownable2Step.sol";
 import { ERC20Permit } from "@openzeppelin-contracts/token/ERC20/extensions/ERC20Permit.sol";
+
 import {
     ERC20,
     ERC4626,
@@ -11,6 +12,8 @@ import {
     Math,
     SafeERC20
 } from "@openzeppelin-contracts/token/ERC20/extensions/ERC4626.sol";
+import { IERC20Metadata } from "@openzeppelin-contracts/token/ERC20/extensions/IERC20Metadata.sol";
+
 import { PendingAddress, PendingLib, PendingUint192 } from "src/libraries/PendingLib.sol";
 import { UtilsLib } from "src/libraries/UtilsLib.sol";
 
@@ -144,6 +147,17 @@ abstract contract BaseMangroveLoopyVault is ERC4626, ERC20Permit, Ownable {
     /// @notice The maximum fee the vault can have (50%)
     uint256 public constant MAX_FEE = 0.5e18;
 
+    /// @notice The constant WAD (10^18)
+    uint256 public constant WAD = 1e18;
+
+    /// @notice OpenZeppelin decimals offset used by the ERC4626 implementation.
+    /// @dev Calculated to be max(0, 18 - underlyingDecimals).
+    /// @dev When equal to zero (<=> token decimals >= 18), the protection against the inflation front-running attack on
+    /// empty vault is low (see https://docs.openzeppelin.com/contracts/5.x/erc4626#inflation-attack). To protect
+    /// against this attack, vault deployers should make an initial deposit of a non-trivial amount in the vault or
+    /// depositors should check that the share price does not exceed a certain limit.
+    uint8 public immutable DECIMALS_OFFSET;
+
     /// @notice Address of the vault curator
     /// @dev The curator has special permissions for vault management
     address public curator;
@@ -250,6 +264,7 @@ abstract contract BaseMangroveLoopyVault is ERC4626, ERC20Permit, Ownable {
         ERC20(_name, _symbol)
         Ownable(owner)
     {
+        DECIMALS_OFFSET = uint8(uint256(18).zeroFloorSub(IERC20Metadata(_asset).decimals()));
         _checkTimelockBounds(initialTimelock);
         _setTimelock(initialTimelock);
     }
@@ -403,6 +418,11 @@ abstract contract BaseMangroveLoopyVault is ERC4626, ERC20Permit, Ownable {
     /// @return Current leverage factor
     function currentLeverageFactor() public view virtual returns (uint256);
 
+    /// @inheritdoc ERC4626
+    function _decimalsOffset() internal view override returns (uint8) {
+        return DECIMALS_OFFSET;
+    }
+
     /// @notice Converts assets to shares, taking into account accrued fees
     /// @dev Overrides ERC4626 implementation to account for fee accrual
     /// @param assets Amount of assets to convert
@@ -526,7 +546,7 @@ abstract contract BaseMangroveLoopyVault is ERC4626, ERC20Permit, Ownable {
         uint256 totalInterest = newTotalAssets.zeroFloorSub(lastTotalAssets);
         if (totalInterest != 0 && fee != 0) {
             // It is acknowledged that `feeAssets` may be rounded down to 0 if `totalInterest * fee < WAD`.
-            uint256 feeAssets = totalInterest.mulDiv(fee, decimals());
+            uint256 feeAssets = totalInterest.mulDiv(fee, WAD);
             // The fee assets is subtracted from the total assets in this calculation to compensate for the fact
             // that total assets is already increased by the total interest (including the fee assets).
             feeShares =

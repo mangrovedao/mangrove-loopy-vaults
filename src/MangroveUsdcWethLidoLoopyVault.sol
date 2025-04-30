@@ -200,6 +200,11 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         address ethUsdPriceFeed;
         address stEthEthPriceFeed;
         uint256 maxPriceStaleness;
+        address curator;
+        address guardian;
+        address feeRecipient;
+        address allocator;
+        uint96 fee;
     }
 
     constructor(VaultParams memory params)
@@ -230,6 +235,12 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         ethUsdPriceFeed = IAggregatorV3Interface(params.ethUsdPriceFeed);
         stEthEthPriceFeed = IAggregatorV3Interface(params.stEthEthPriceFeed);
         maxPriceStaleness = params.maxPriceStaleness;
+
+        curator = params.curator;
+        guardian = params.guardian;
+        feeRecipient = params.feeRecipient;
+        isAllocator[params.allocator] = true;
+        fee = params.fee;
 
         // Verify that the market exists and has the correct tokens
         MarketParams memory marketParams = morpho.idToMarketParams(morphoMarketId);
@@ -406,7 +417,10 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     {
         uint256 directBalance = usdc.balanceOf(address(this));
         if (assets > directBalance) {
-            assets = _unwindLoopAsNeeded(assets - directBalance);
+            IMangroveGhostbook.ModuleData memory data;
+            assets = _unwindLoopAsNeeded(
+                assets - directBalance, 0, IMangroveGhostbook.Tick.wrap(0), data
+            );
         }
         super._withdraw(_msgSender(), receiver, owner, assets, shares);
     }
@@ -414,48 +428,33 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Rebalances the loop strategy by adjusting leverage incrementally
     /// @dev Adds or removes positions to achieve target leverage without fully unwinding
     /// @param tickSpacing The tick spacing for any swaps needed during rebalancing
-    function rebalance(uint256 tickSpacing) external onlyAllocatorRole {
-        // First accrue fees
+    /// @param maxTick The maximum tick for the swap
+    /// @param moduleData Additional data for the swap module
+    function rebalance(
+        uint256 tickSpacing,
+        IMangroveGhostbook.Tick maxTick,
+        IMangroveGhostbook.ModuleData memory moduleData
+    )
+        external
+        onlyAllocatorRole
+    {
         uint256 newTotalAssets = _accrueFee();
-
-        // Update lastTotalAssets to avoid inconsistent state in re-entrant context
         lastTotalAssets = newTotalAssets;
 
-        // Calculate current and target leverage
         uint256 currentLeverage = currentLeverageFactor();
+        if (currentLeverage == targetLeverage) return;
 
-        // If we're at target, no action needed
-        uint256 leverageDelta = 0;
-        bool needsIncreasing = false;
+        uint256 leverageDelta =
+            currentLeverage < targetLeverage ? targetLeverage - currentLeverage : currentLeverage - targetLeverage;
 
-        // Determine if we need to increase or decrease leverage
+        if (leverageDelta < 5) return; // 0.05% adjustment threshold
+
         if (currentLeverage < targetLeverage) {
-            leverageDelta = targetLeverage - currentLeverage;
-            needsIncreasing = true;
-        } else if (currentLeverage > targetLeverage) {
-            leverageDelta = currentLeverage - targetLeverage;
-            needsIncreasing = false;
+            _increaseDebt(leverageDelta, tickSpacing, maxTick, moduleData);
         } else {
-            // Already at target leverage, nothing to do
-            return;
+            _unwindLoopAsNeeded(leverageDelta, tickSpacing, maxTick, moduleData);
         }
 
-        // Calculate how much to adjust by - using a delta threshold to avoid tiny adjustments
-        uint256 adjustmentThreshold = 5; // 0.05% in basis points
-        if (leverageDelta < adjustmentThreshold) {
-            // Difference is too small to justify a rebalance
-            return;
-        }
-
-        if (needsIncreasing) {
-            // Increase leverage by executing additional loops
-            _increaseDebt(leverageDelta);
-        } else {
-            // Decrease leverage by partially unwinding
-            _unwindLoopAsNeeded(leverageDelta);
-        }
-
-        // Update lastTotalAssets after rebalancing
         _updateLastTotalAssets(totalAssets());
     }
     /// @notice Emergency function to unwind all loops
@@ -485,75 +484,78 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         aavePool.supply(address(usdc), usdcBalance, address(this), 0);
 
         // Borrow WETH to initiate loop
-        _increaseDebt(usdcBalance);
+        IMangroveGhostbook.ModuleData memory data;
+        _increaseDebt(
+            usdcBalance,
+            0,
+            IMangroveGhostbook.Tick.wrap(0),
+            data
+        );
     }
 
-    function _increaseDebt(uint256 usdcAmount) internal {
-        // Calculate initial borrow capacity for WETH on Aave
+    function _increaseDebt(
+        uint256 usdcAmount,
+        uint256 tickSpacing,
+        IMangroveGhostbook.Tick maxTick,
+        IMangroveGhostbook.ModuleData memory moduleData
+    )
+        internal
+    {
         uint256 initialBorrowCapacity = _calculateBorrowCapacityAave();
-        uint256 remainingBorrowCapacity = initialBorrowCapacity;
-
-        // Calculate how much WETH to borrow based on target leverage
         uint256 targetBorrowAmount = usdcAmount * targetLeverage / BASIS_POINTS;
         uint256 borrowedSoFar = 0;
 
+        // Initial borrow from Aave
+        uint256 initialBorrow = Math.min(initialBorrowCapacity, targetBorrowAmount);
+        if (initialBorrow > 0) {
+            aavePool.borrow(address(weth), initialBorrow, 2, 0, address(this));
+            borrowedSoFar += initialBorrow;
+            totalWethBorrowed += initialBorrow;
+        }
+
+        // Swap WETH to stETH
+        uint256 stEthReceived;
+        if (tickSpacing == 0) {
+            stEthReceived = _fastSwap(false, initialBorrow);
+        } else {
+            stEthReceived = _optimalSwap(false, initialBorrow, tickSpacing, maxTick, moduleData);
+        }
+        totalStEthHeld += stEthReceived;
+
         // Start looping process
         for (uint256 i = 0; i < maxIterations && borrowedSoFar < targetBorrowAmount; i++) {
-            // Calculate how much WETH to borrow in this iteration from Aave
-            uint256 iterationBorrow = Math.min(
-                remainingBorrowCapacity,
-                (targetBorrowAmount - borrowedSoFar) / 2 // Divide by 2 since we'll borrow roughly same amount from
-                    // Morpho
-            );
+            // Supply stETH to Morpho as collateral
+            morpho.supplyCollateral(_morphoMarketParams, stEthReceived, address(this), "");
 
-            if (iterationBorrow == 0) break;
+            // Calculate borrow amount from Morpho
+            uint256 morphoBorrowAmount =
+                Math.min(_calculateBorrowCapacityMorpho(_morphoMarketParams), targetBorrowAmount - borrowedSoFar);
 
-            // Step 1: Borrow WETH from Aave
-            aavePool.borrow(address(weth), iterationBorrow, 2, 0, address(this));
+            if (morphoBorrowAmount == 0) break;
 
-            // Step 2: Swap weth for steth
-            uint256 stEthReceived = swapper.swap(address(weth), address(stEth), iterationBorrow);
-
-            // Step 3: Supply stETH to Morpho as collateral
-            (uint256 suppliedStEth,) = morpho.supply(
+            // Borrow WETH from Morpho
+            (uint256 borrowedWeth,) = morpho.borrow(
                 _morphoMarketParams,
-                stEthReceived,
-                0, // min shares
+                morphoBorrowAmount,
+                0, // max shares
                 address(this),
-                ""
+                address(this)
             );
 
-            // Step 4: Borrow WETH from Morpho using stETH as collateral
-            uint256 morphoBorrowAmount = Math.min(
-                _calculateBorrowCapacityMorpho(_morphoMarketParams),
-                (targetBorrowAmount - borrowedSoFar - iterationBorrow)
-            );
+            borrowedSoFar += borrowedWeth;
+            totalWethBorrowed += borrowedWeth;
 
-            if (morphoBorrowAmount > 0) {
-                (uint256 borrowedWeth,) = morpho.borrow(
-                    _morphoMarketParams,
-                    morphoBorrowAmount,
-                    type(uint256).max, // max shares
-                    address(this),
-                    address(this)
-                );
-
-                // Update tracking variables with Morpho borrowed amount
-                borrowedSoFar += iterationBorrow + borrowedWeth;
-                totalWethBorrowed += iterationBorrow + borrowedWeth;
+            // Swap new WETH to stETH for next iteration
+            if (tickSpacing == 0) {
+                stEthReceived = _fastSwap(false, initialBorrow);
             } else {
-                // Update tracking variables with just Aave borrowed amount
-                borrowedSoFar += iterationBorrow;
-                totalWethBorrowed += iterationBorrow;
+                stEthReceived = _optimalSwap(false, initialBorrow, tickSpacing, maxTick, moduleData);
             }
-
             totalStEthHeld += stEthReceived;
+
             currentIterations++;
 
-            // Calculate remaining borrow capacity on Aave for next iteration
-            remainingBorrowCapacity = _calculateBorrowCapacityAave();
-
-            emit LoopIteration(i + 1, iterationBorrow, stEthReceived);
+            emit LoopIteration(i + 1, borrowedWeth, stEthReceived);
 
             // Check health factor after each iteration
             uint256 healthFactor = _getCurrentHealthFactorAave();
@@ -566,12 +568,22 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Unwinds the loop position completely
     /// @dev Repays all WETH debt and redeems all stETH
     function _unwindLoop() internal returns (uint256 balance) {
-        return _unwindLoopAsNeeded(totalAssets());
+        IMangroveGhostbook.ModuleData memory data;
+        return
+            _unwindLoopAsNeeded(totalAssets(), 0, IMangroveGhostbook.Tick.wrap(0), data);
     }
 
     /// @notice Unwinds only as much of the loop as needed to free up a specific amount of assets
     /// @param assetsNeeded Amount of assets (USDC) needed
-    function _unwindLoopAsNeeded(uint256 assetsNeeded) internal returns (uint256) {
+    function _unwindLoopAsNeeded(
+        uint256 assetsNeeded,
+        uint256 tickSpacing,
+        IMangroveGhostbook.Tick maxTick,
+        IMangroveGhostbook.ModuleData memory moduleData
+    )
+        internal
+        returns (uint256)
+    {
         uint256 directBalance = usdc.balanceOf(address(this));
         if (directBalance >= assetsNeeded || currentIterations == 0) return assetsNeeded;
 
@@ -600,7 +612,11 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
                     // Swap stEth to weth
                     uint256 stEthToSwap = 0;
                     uint256 morphoRepayAmountBefore = morphoRepayAmount;
-                    morphoRepayAmount -= _fastSwapStEthToEth(stEthToSwap);
+                    if (tickSpacing == 0) {
+                        morphoRepayAmount -= _fastSwap(true, stEthToSwap);
+                    } else {
+                        morphoRepayAmount -= _optimalSwap(true, stEthToSwap, tickSpacing, maxTick, moduleData);
+                    }
                     // Reduce all requested values by the % of losses of he swap
                     assetsNeeded = assetsNeeded * morphoRepayAmountBefore / morphoRepayAmount;
                     additionalUsdcNeeded = additionalUsdcNeeded * morphoRepayAmountBefore / morphoRepayAmount;
@@ -640,15 +656,23 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         return assetsNeeded;
     }
 
-    function _fastSwapStEthToEth(uint256 stEthAmountIn) internal returns (uint256 losses) {
-        uint256 wethAmountOut = swapper.swap(address(stEth), address(weth), stEthAmountIn);
-        uint256 stEthAmountOut = wethAmountOut * 1e18 / getStEthPriceInEth();
-        losses = stEthAmountIn - stEthAmountOut;
+    function _fastSwap(bool stEthToWeth, uint256 amountIn) internal returns (uint256 losses) {
+        address tokenIn = stEthToWeth ? address(stEth) : address(weth);
+        address tokenOut = stEthToWeth ? address(weth) : address(stEth);
+        uint256 amountOut = swapper.swap(tokenIn, tokenOut, amountIn);
+        uint256 expectedOut;
+        if (stEthToWeth) {
+            expectedOut = amountIn * getStEthPriceInEth() / 1e18;
+        } else {
+            expectedOut = amountIn * 1e18 / getStEthPriceInEth();
+        }
+        losses = expectedOut > amountOut ? expectedOut - amountOut : 0;
         return losses;
     }
 
-    function _optimalSwapStEthToEth(
-        uint256 stEthAmount,
+    function _optimalSwap(
+        bool stEthToWeth,
+        uint256 amountIn,
         uint256 tickSpacing,
         IMangroveGhostbook.Tick maxTick,
         IMangroveGhostbook.ModuleData memory moduleData
@@ -657,13 +681,15 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         returns (uint256 losses)
     {
         IMangroveGhostbook.OLKey memory key = IMangroveGhostbook.OLKey({
-            outbound_tkn: address(weth),
-            inbound_tkn: address(stEth),
+            outbound_tkn: stEthToWeth ? address(weth) : address(stEth),
+            inbound_tkn: stEthToWeth ? address(stEth) : address(weth),
             tickSpacing: tickSpacing
         });
-        (uint256 takerGot, uint256 takerGave,,) = ghostbook.marketOrderByTick(key, maxTick, stEthAmount, moduleData);
-        if (takerGave < stEthAmount) revert();
-        losses = stEthAmount - takerGot;
+        (uint256 takerGot, uint256 takerGave,,) = ghostbook.marketOrderByTick(key, maxTick, amountIn, moduleData);
+        if (takerGave < amountIn) revert();
+        uint256 expectedOut =
+            stEthToWeth ? amountIn * getStEthPriceInEth() / 1e18 : amountIn * 1e18 / getStEthPriceInEth();
+        losses = expectedOut > takerGot ? expectedOut - takerGot : 0;
         return losses;
     }
 

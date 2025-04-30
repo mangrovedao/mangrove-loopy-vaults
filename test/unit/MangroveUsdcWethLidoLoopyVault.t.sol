@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import { BaseTest } from "../base/BaseTest.t.sol";
 import { USDC_BASE, WETH_BASE, WST_ETH_BASE } from "../helpers/Tokens.sol";
 
+import { VerboseWeth } from "../helpers/mock/VerboseWeth.sol";
 import { AerodromeSwapper } from "src/AerodromeSwapper.sol";
 import {
     BaseMangroveLoopyVault,
@@ -47,7 +48,18 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         0x3a4048c64ba1b375330d376b1ce40e4047d03b47ab4d48af484edec9fec801ba;
 
     function setUp() public {
-        _setUp("BASE", 29_215_255);
+        _setUp("BASE", 26_607_127);
+        VerboseWeth mockWeth = new VerboseWeth();
+
+        // Fetch WETH balances before vm.etch
+        uint256 morphoWethBalance = IERC20(WETH_BASE).balanceOf(MORPHO_BASE);
+        uint256 aavePoolWethBalance = IERC20(WETH_BASE).balanceOf(AAVE_POOL_BASE);
+        uint256 aerodromeRouterWethBalance = IERC20(WETH_BASE).balanceOf(AERODROME_ROUTER_BASE);
+        uint256 aerodromeWethStEthPoolWethBalance = IERC20(WETH_BASE).balanceOf(AERODROME_WETH_ST_ETH_POOL_BASE);
+
+        // Set mock bytecode WETH for easier debugging
+        vm.etch(WETH_BASE, address(mockWeth).code);
+
         morphoMarketParams = MarketParams({
             loanToken: WETH_BASE,
             collateralToken: WST_ETH_BASE,
@@ -77,8 +89,13 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             morphoLtv: MORPHO_LTV,
             ethUsdPriceFeed: ETH_USD_PRICE_FEED_BASE,
             stEthEthPriceFeed: STETH_ETH_PRICE_FEED_BASE,
-            maxPriceStaleness: type(uint256).max // prevents bug from fork
-         });
+            maxPriceStaleness: type(uint256).max, // prevents bug from fork
+            curator: users.curator,
+            guardian: users.guardian,
+            feeRecipient: users.feeRecipient,
+            allocator: users.allocator,
+            fee: 0.1 ether
+        });
 
         vault = new MangroveUsdcWethLidoLoopyVault(params);
         _setUpLabels();
@@ -155,43 +172,17 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(address(vault.ethUsdPriceFeed()), ETH_USD_PRICE_FEED_BASE);
         assertEq(address(vault.stEthEthPriceFeed()), STETH_ETH_PRICE_FEED_BASE);
         assertEq(vault.owner(), users.alice);
+        assertEq(vault.curator(), users.curator);
+        assertEq(vault.guardian(), users.guardian);
+        assertEq(vault.feeRecipient(), users.feeRecipient);
+        assertEq(vault.isAllocator(users.allocator), true);
+        assertEq(vault.fee(), 0.1 ether);
     }
 
     function testDeposit_WithFullLoopStrategy() public {
         // Fund the user with USDC
         uint256 depositAmount = 1000 * 1e6; // 1000 USDC
         deal(USDC_BASE, users.alice, depositAmount);
-
-        // Set up mocks for external calls that might be difficult to simulate in a test environment
-        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().supply.selector), abi.encode());
-
-        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().borrow.selector), abi.encode());
-
-        vm.mockCall(
-            address(vault.morpho()),
-            abi.encodeWithSelector(vault.morpho().supply.selector),
-            abi.encode(uint256(0), uint256(0))
-        );
-
-        vm.mockCall(
-            address(vault.morpho()),
-            abi.encodeWithSelector(vault.morpho().borrow.selector),
-            abi.encode(uint256(0), uint256(0))
-        );
-
-        // Mock the swapper to simulate successful swaps
-        vm.mockCall(
-            address(vault.swapper()),
-            abi.encodeWithSelector(vault.swapper().swap.selector),
-            abi.encode(100 * 1e18) // Return 100 stETH for any swap
-        );
-
-        // Mock Aave's getUserAccountData
-        vm.mockCall(
-            address(vault.aavePool()),
-            abi.encodeWithSelector(vault.aavePool().getUserAccountData.selector),
-            abi.encode(depositAmount, 0, depositAmount / 2, 0, 0, 2e27) // Good health factor
-        );
 
         // Approve and deposit
         vm.startPrank(users.alice);
@@ -215,19 +206,6 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         uint256 totalWethBorrowedBefore = vault.totalWethBorrowed();
         uint256 totalStEthHeldBefore = vault.totalStEthHeld();
 
-        // Mock unwinding functions
-        vm.mockCall(
-            address(vault.aavePool()),
-            abi.encodeWithSelector(vault.aavePool().withdraw.selector),
-            abi.encode(100 * 1e6) // Return 100 USDC
-        );
-
-        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().repay.selector), abi.encode());
-
-        vm.mockCall(address(vault.morpho()), abi.encodeWithSelector(vault.morpho().withdraw.selector), abi.encode(0, 0));
-
-        vm.mockCall(address(vault.morpho()), abi.encodeWithSelector(vault.morpho().repay.selector), abi.encode(0, 0));
-
         // Calculate 50% of shares
         uint256 shares = vault.balanceOf(users.alice);
         uint256 halfShares = shares / 2;
@@ -243,29 +221,26 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         // Verify shares were burned
         assertEq(vault.balanceOf(users.alice), shares - halfShares);
 
-        // Note: We can't verify totalWethBorrowed and totalStEthHeld changes
-        // because the real unwinding logic doesn't run with our mocks
+        // Verify totalWethBorrowed and totalStEthHeld were reduced
+        assertEq(vault.totalWethBorrowed(), totalWethBorrowedBefore - halfShares);
+        assertEq(vault.totalStEthHeld(), totalStEthHeldBefore - halfShares);
     }
 
-    function testRebalance_WhenOverlevered() public {
-        // First deposit to set up the position
-        testDeposit_WithFullLoopStrategy();
+    // TODO: rebalance using ghostbook
+    // function testRebalance_WhenOverlevered() public {
+    //     // First deposit to set up the position
+    //     testDeposit_WithFullLoopStrategy();
 
-        // Mock overleverage condition (mock price feeds)
-        mockEthPriceDecrease(20); // 20% price drop
+    //     // Mock overleverage condition (mock price feeds)
+    //     mockEthPriceDecrease(20); // 20% price drop
 
-        // Mock the rebalance functions
-        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().repay.selector), abi.encode());
+    //     // Call rebalance as allocator
+    //     vm.prank(users.allocator);
+    //     vault.rebalance(3000); // Using a tick spacing of 3000
 
-        vm.mockCall(address(vault.morpho()), abi.encodeWithSelector(vault.morpho().repay.selector), abi.encode(0, 0));
-
-        // Call rebalance as allocator
-        vm.prank(users.allocator);
-        vault.rebalance(3000); // Using a tick spacing of 3000
-
-        // The actual verification would check that leverage was adjusted,
-        // but we can't effectively test this with mocks
-    }
+    //     // The actual verification would check that leverage was adjusted,
+    //     // but we can't effectively test this with mocks
+    // }
 
     function testMangroveUsdcWethLidoLoopyVault_SetMorphoLtv() public {
         // Test setting a new morphoLtv value

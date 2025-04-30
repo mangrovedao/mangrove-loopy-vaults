@@ -19,12 +19,12 @@ contract AerodromeSwapper {
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
         address pool = router.poolFor(tokenIn, tokenOut, false, factory);
-        IERC20(tokenIn).safeIncreaseAllowance(pool, amountIn);
+        IERC20(tokenIn).safeIncreaseAllowance(address(router), amountIn);
 
         IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
         routes[0] = IAerodromeRouter.Route({ from: tokenIn, to: tokenOut, stable: false, factory: factory });
         amountOut = router.swapExactTokensForTokens(amountIn, 0, routes, address(this), block.timestamp)[1];
-        IERC20(tokenIn).safeDecreaseAllowance(pool, amountIn);
+        IERC20(tokenIn).safeDecreaseAllowance(address(router), 0);
         IERC20(tokenOut).safeTransfer(msg.sender, amountOut);
         return amountOut;
     }

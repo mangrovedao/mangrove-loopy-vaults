@@ -2,7 +2,7 @@
 pragma solidity ^0.8.19;
 
 // Token addresses on Base network
-address constant WETH_BASE = 0x4200000000000000000000000000000000000006;
+address payable constant WETH_BASE = payable(0x4200000000000000000000000000000000000006);
 address constant USDC_BASE = 0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA;
 address constant ST_ETH_BASE = 0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22;
 address constant WST_ETH_BASE = 0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452;

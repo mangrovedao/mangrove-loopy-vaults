@@ -14,6 +14,7 @@ contract BaseTest is Test {
         address payable curator;
         address payable allocator;
         address payable guardian;
+        address payable feeRecipient;
     }
 
     Utilities public utils;
@@ -41,9 +42,10 @@ contract BaseTest is Test {
             bob: utils.createUser("Bob", tokens),
             eve: utils.createUser("Eve", tokens),
             charlie: utils.createUser("Charlie", tokens),
-            curator: utils.createUser("curator", tokens),
+            curator: utils.createUser("Curator", tokens),
             allocator: utils.createUser("Allocator", tokens),
-            guardian: utils.createUser("Guardian", tokens)
+            guardian: utils.createUser("Guardian", tokens),
+            feeRecipient: utils.createUser("FeeRecipient", tokens)
         });
     }
 

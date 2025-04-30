@@ -2,6 +2,7 @@
 src = "src"
 out = "out"
 libs = ["dependencies"]
+evm_version = "shanghai"
 
 [dependencies]
 forge-std = "1.9.6"
