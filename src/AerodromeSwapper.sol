@@ -17,7 +17,7 @@ contract AerodromeSwapper {
 
     function swap(address tokenIn, address tokenOut, uint256 amountIn) external returns (uint256 amountOut) {
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
-        
+
         address pool = router.poolFor(tokenIn, tokenOut, false, factory);
         IERC20(tokenIn).safeIncreaseAllowance(pool, amountIn);
 
