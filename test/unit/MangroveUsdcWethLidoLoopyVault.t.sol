@@ -7,14 +7,14 @@ import { USDC_BASE, WETH_BASE, WST_ETH_BASE } from "../helpers/Tokens.sol";
 import { AerodromeSwapper } from "src/AerodromeSwapper.sol";
 import {
     BaseMangroveLoopyVault,
+    IAggregatorV3Interface,
     IERC20,
     IMangroveGhostbook,
     ISwapModule,
     Id,
     MangroveUsdcWethLidoLoopyVault,
     MarketParams,
-    SafeERC20,
-    IAggregatorV3Interface
+    SafeERC20
 } from "src/MangroveUsdcWethLidoLoopyVault.sol";
 
 contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
@@ -78,7 +78,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             ethUsdPriceFeed: ETH_USD_PRICE_FEED_BASE,
             stEthEthPriceFeed: STETH_ETH_PRICE_FEED_BASE,
             maxPriceStaleness: type(uint256).max // prevents bug from fork
-        });
+         });
 
         vault = new MangroveUsdcWethLidoLoopyVault(params);
         _setUpLabels();
@@ -100,11 +100,11 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         vm.label(AERODROME_WETH_ST_ETH_POOL_BASE, "AERODROME_WETH_ST_ETH_POOL");
     }
 
-     function mockEthPriceDecrease(uint256 percentDecrease) internal {
+    function mockEthPriceDecrease(uint256 percentDecrease) internal {
         // Get current price
-        (,int256 currentPrice,,,) = IAggregatorV3Interface(ETH_USD_PRICE_FEED_BASE).latestRoundData();
+        (, int256 currentPrice,,,) = IAggregatorV3Interface(ETH_USD_PRICE_FEED_BASE).latestRoundData();
         int256 newPrice = currentPrice * int256(100 - percentDecrease) / 100;
-        
+
         // Mock the price feed
         vm.mockCall(
             ETH_USD_PRICE_FEED_BASE,
@@ -112,12 +112,12 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             abi.encode(uint80(0), newPrice, uint256(0), block.timestamp, uint80(0))
         );
     }
-    
+
     function mockEthPriceIncrease(uint256 percentIncrease) internal {
         // Get current price
-        (,int256 currentPrice,,,) = IAggregatorV3Interface(ETH_USD_PRICE_FEED_BASE).latestRoundData();
+        (, int256 currentPrice,,,) = IAggregatorV3Interface(ETH_USD_PRICE_FEED_BASE).latestRoundData();
         int256 newPrice = currentPrice * int256(100 + percentIncrease) / 100;
-        
+
         // Mock the price feed
         vm.mockCall(
             ETH_USD_PRICE_FEED_BASE,
@@ -125,12 +125,12 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             abi.encode(uint80(0), newPrice, uint256(0), block.timestamp, uint80(0))
         );
     }
-    
+
     function mockStEthPriceIncrease(uint256 percentIncrease) internal {
         // Get current price
-        (,int256 currentPrice,,,) = IAggregatorV3Interface(STETH_ETH_PRICE_FEED_BASE).latestRoundData();
+        (, int256 currentPrice,,,) = IAggregatorV3Interface(STETH_ETH_PRICE_FEED_BASE).latestRoundData();
         int256 newPrice = currentPrice * int256(100 + percentIncrease) / 100;
-        
+
         // Mock the price feed
         vm.mockCall(
             STETH_ETH_PRICE_FEED_BASE,
@@ -138,7 +138,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             abi.encode(uint80(0), newPrice, uint256(0), block.timestamp, uint80(0))
         );
     }
-    
+
     function testMangroveUsdcWethLidoLoopyVault_InitialState() public {
         // Check that the vault was initialized with the correct values
         assertEq(address(vault.usdc()), USDC_BASE);
@@ -161,136 +161,108 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         // Fund the user with USDC
         uint256 depositAmount = 1000 * 1e6; // 1000 USDC
         deal(USDC_BASE, users.alice, depositAmount);
-        
+
         // Set up mocks for external calls that might be difficult to simulate in a test environment
-        vm.mockCall(
-            address(vault.aavePool()),
-            abi.encodeWithSelector(vault.aavePool().supply.selector),
-            abi.encode()
-        );
-        
-        vm.mockCall(
-            address(vault.aavePool()),
-            abi.encodeWithSelector(vault.aavePool().borrow.selector),
-            abi.encode()
-        );
-        
+        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().supply.selector), abi.encode());
+
+        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().borrow.selector), abi.encode());
+
         vm.mockCall(
             address(vault.morpho()),
             abi.encodeWithSelector(vault.morpho().supply.selector),
             abi.encode(uint256(0), uint256(0))
         );
-        
+
         vm.mockCall(
             address(vault.morpho()),
             abi.encodeWithSelector(vault.morpho().borrow.selector),
             abi.encode(uint256(0), uint256(0))
         );
-        
+
         // Mock the swapper to simulate successful swaps
         vm.mockCall(
             address(vault.swapper()),
             abi.encodeWithSelector(vault.swapper().swap.selector),
             abi.encode(100 * 1e18) // Return 100 stETH for any swap
         );
-        
+
         // Mock Aave's getUserAccountData
         vm.mockCall(
             address(vault.aavePool()),
             abi.encodeWithSelector(vault.aavePool().getUserAccountData.selector),
             abi.encode(depositAmount, 0, depositAmount / 2, 0, 0, 2e27) // Good health factor
         );
-        
+
         // Approve and deposit
         vm.startPrank(users.alice);
         IERC20(USDC_BASE).safeIncreaseAllowance(address(vault), depositAmount);
         uint256 shares = vault.deposit(depositAmount, users.alice);
         vm.stopPrank();
-        
+
         // Verify shares were minted
         assertEq(vault.balanceOf(users.alice), shares);
-        
+
         // Verify deposit was processed
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 0);
         assertEq(vault.totalSupply(), shares);
     }
-    
+
     function testWithdraw_PartialWithUnwinding() public {
         // First deposit to set up the position
         testDeposit_WithFullLoopStrategy();
-        
+
         // Track state before withdrawal
         uint256 totalWethBorrowedBefore = vault.totalWethBorrowed();
         uint256 totalStEthHeldBefore = vault.totalStEthHeld();
-        
+
         // Mock unwinding functions
         vm.mockCall(
             address(vault.aavePool()),
             abi.encodeWithSelector(vault.aavePool().withdraw.selector),
             abi.encode(100 * 1e6) // Return 100 USDC
         );
-        
-        vm.mockCall(
-            address(vault.aavePool()),
-            abi.encodeWithSelector(vault.aavePool().repay.selector),
-            abi.encode()
-        );
-        
-        vm.mockCall(
-            address(vault.morpho()),
-            abi.encodeWithSelector(vault.morpho().withdraw.selector),
-            abi.encode(0, 0)
-        );
-        
-        vm.mockCall(
-            address(vault.morpho()),
-            abi.encodeWithSelector(vault.morpho().repay.selector),
-            abi.encode(0, 0)
-        );
-        
+
+        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().repay.selector), abi.encode());
+
+        vm.mockCall(address(vault.morpho()), abi.encodeWithSelector(vault.morpho().withdraw.selector), abi.encode(0, 0));
+
+        vm.mockCall(address(vault.morpho()), abi.encodeWithSelector(vault.morpho().repay.selector), abi.encode(0, 0));
+
         // Calculate 50% of shares
         uint256 shares = vault.balanceOf(users.alice);
         uint256 halfShares = shares / 2;
-        
+
         // Withdraw half the position
         vm.startPrank(users.alice);
         uint256 assets = vault.redeem(halfShares, users.alice, users.alice);
         vm.stopPrank();
-        
+
         // Verify USDC was returned (mocked value)
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 100 * 1e6);
-        
+
         // Verify shares were burned
         assertEq(vault.balanceOf(users.alice), shares - halfShares);
-        
+
         // Note: We can't verify totalWethBorrowed and totalStEthHeld changes
         // because the real unwinding logic doesn't run with our mocks
     }
-    
+
     function testRebalance_WhenOverlevered() public {
         // First deposit to set up the position
         testDeposit_WithFullLoopStrategy();
-        
+
         // Mock overleverage condition (mock price feeds)
         mockEthPriceDecrease(20); // 20% price drop
-        
+
         // Mock the rebalance functions
-        vm.mockCall(
-            address(vault.aavePool()),
-            abi.encodeWithSelector(vault.aavePool().repay.selector),
-            abi.encode()
-        );
-        
-        vm.mockCall(
-            address(vault.morpho()),
-            abi.encodeWithSelector(vault.morpho().repay.selector),
-            abi.encode(0, 0)
-        );
-        
+        vm.mockCall(address(vault.aavePool()), abi.encodeWithSelector(vault.aavePool().repay.selector), abi.encode());
+
+        vm.mockCall(address(vault.morpho()), abi.encodeWithSelector(vault.morpho().repay.selector), abi.encode(0, 0));
+
         // Call rebalance as allocator
         vm.prank(users.allocator);
         vault.rebalance(3000); // Using a tick spacing of 3000
-        
+
         // The actual verification would check that leverage was adjusted,
         // but we can't effectively test this with mocks
     }
