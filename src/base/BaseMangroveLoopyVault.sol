@@ -279,6 +279,12 @@ abstract contract BaseMangroveLoopyVault is ERC4626, ERC20Permit, Ownable {
         return depositsCap.zeroFloorSub(totalAssets());
     }
 
+    /// @notice Returns the value of a single vault share
+    /// @return The value of a single vault share in assets
+    function pricePerShare() public view returns (uint256) {
+        return convertToAssets(10 ** decimals());
+    }
+
     /// @notice Sets a new curator for the vault
     /// @dev Only callable by the owner
     /// @param newCurator Address of the new curator

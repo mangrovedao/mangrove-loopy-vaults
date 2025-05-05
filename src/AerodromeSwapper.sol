@@ -28,4 +28,19 @@ contract AerodromeSwapper {
         IERC20(tokenOut).safeTransfer(msg.sender, amountOut);
         return amountOut;
     }
+
+    function previewSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn
+    )
+        external
+        view
+        returns (uint256 amountOut)
+    {
+        address pool = router.poolFor(tokenIn, tokenOut, false, factory);
+        IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
+        routes[0] = IAerodromeRouter.Route({ from: tokenIn, to: tokenOut, stable: false, factory: factory });
+        return router.getAmountsOut(amountIn, routes)[1];
+    }
 }

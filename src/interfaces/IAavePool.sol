@@ -1,3 +1,7 @@
+pragma solidity ^0.8.13;
+
+import { DataTypes } from "src/libraries/AaveDataTypes.sol";
+
 /// @title IAavePool
 /// @notice Interface for Aave V3 Pool contract
 interface IAavePool {
@@ -57,4 +61,8 @@ interface IAavePool {
             uint256 ltv,
             uint256 healthFactor
         );
+
+    function getReserveData(address asset) external view returns (DataTypes.ReserveData memory);
+
+    function getReserveAToken(address asset) external view returns (address);
 }
