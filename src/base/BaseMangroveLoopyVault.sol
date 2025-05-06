@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.19;
 
 import { Ownable, Ownable2Step } from "@openzeppelin-contracts/access/Ownable2Step.sol";
 import { ERC20Permit } from "@openzeppelin-contracts/token/ERC20/extensions/ERC20Permit.sol";

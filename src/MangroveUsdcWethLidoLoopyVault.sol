@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.19;
 
 import { IAaveOracle } from "./interfaces/IAaveOracle.sol";
 import { IAavePool } from "./interfaces/IAavePool.sol";
@@ -15,7 +15,6 @@ import {
 } from "src/base/BaseMangroveLoopyVault.sol";
 import { DataTypes } from "src/libraries/AaveDataTypes.sol";
 
-import "forge-std/console.sol";
 import { IAggregatorV3Interface } from "src/interfaces/IAggregatorV3Interface.sol";
 import { IMangroveGhostbook } from "src/interfaces/IMangroveGhostbook.sol";
 import { ISwapModule } from "src/interfaces/ISwapModule.sol";
@@ -123,15 +122,19 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Morpho protocol contract
     IMorpho public immutable morpho;
 
+    /// @notice Swapper module for token exchanges
     ISwapModule public swapper;
 
+    /// @notice Ghostbook contract for Mangrove integration
     IMangroveGhostbook public ghostbook;
 
+    /// @notice Precision factor for Aave oracle price feeds
     uint256 constant AAVE_ORACLE_PRECISION = 1e8;
 
     /// @notice Morpho market ID for stETH-WETH market
     Id public immutable morphoMarketId;
 
+    /// @notice Morpho market parameters for the stETH-WETH market
     MarketParams private _morphoMarketParams;
 
     /// @notice Pending swap module address with its timelock information
@@ -147,7 +150,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     uint256 public constant MIN_HEALTH_FACTOR = 120;
 
     /// @notice Maximum leverage factor allowed (in basis points, e.g., 500 = 5x)
-    uint256 public constant MAX_LEVERAGE = 500;
+    uint256 public constant MAX_LEVERAGE = 20_000;
 
     /// @notice The basis points denominator (10000 = 100%)
     uint256 public constant BASIS_POINTS = 10_000;
@@ -158,6 +161,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Maximum price feed staleness allowed (upgradeable)
     uint256 public maxPriceStaleness;
 
+    /// @notice Loan-to-value ratio for Morpho borrowing
     uint256 public morphoLtv;
 
     /// @notice Chainlink price feed for ETH/USD
@@ -171,15 +175,26 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @param initialTimelock Initial timelock duration
     /// @param usdc Address of the USDC token
     /// @param weth Address of the WETH token
-    /// @param lido Address of the Lido staking contract
     /// @param stEth Address of the stETH token
     /// @param aavePool Address of the Aave lending pool
+    /// @param aaveOracle Address of the Aave oracle
     /// @param morpho Address of the Morpho protocol
     /// @param morphoMarketParams Morpho market params for stETH-WETH market
     /// @param maxIterations Maximum number of loop iterations allowed
     /// @param targetLeverage Target leverage multiplier (in basis points)
     /// @param name Name of the vault token
     /// @param symbol Symbol of the vault token
+    /// @param swapper Address of the swap module
+    /// @param ghostbook Address of the Mangrove ghostbook
+    /// @param morphoLtv LTV ratio for Morpho borrowing
+    /// @param ethUsdPriceFeed Address of the ETH/USD Chainlink price feed
+    /// @param stEthEthPriceFeed Address of the stETH/ETH Chainlink price feed
+    /// @param maxPriceStaleness Maximum allowed staleness for price feeds
+    /// @param curator Address of the curator
+    /// @param guardian Address of the guardian
+    /// @param feeRecipient Address that receives fees
+    /// @param allocator Address of the allocator
+    /// @param fee Fee amount in basis points
     struct VaultParams {
         address owner;
         uint256 initialTimelock;
@@ -302,7 +317,6 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @dev Only callable by the owner
     /// @param _maxIterations New maximum number of iterations
     function setMaxIterations(uint256 _maxIterations) external onlyOwner {
-        require(_maxIterations > 0, "Zero max iterations");
         maxIterations = _maxIterations;
         emit SetMaxIterations(_maxIterations);
     }
@@ -337,7 +351,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         if (usdcValue == 0) return 0;
 
         // Calculate total position value including borrowed assets
-        uint256 totalPositionValue = usdcValue + _getStEthValueInUsdc();
+        uint256 totalPositionValue = usdcValue + getStEthValueInUsdc();
 
         return totalPositionValue * BASIS_POINTS / usdcValue;
     }
@@ -346,11 +360,11 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     function totalAssets() public view override returns (uint256) {
         // Direct USDC balance held by the vault
         uint256 totalUsdcHoldings = usdc.balanceOf(address(this)) + _totalUsdcCollateral();
-        uint256 totalWethDebtInUsdc = _getWethDebtInUsdc();
+        uint256 totalWethDebtInUsdc = getWethDebtInUsdc();
 
         // Uint256
         // Value of stETH (minus the WETH debt) - this represents our earned yield
-        uint256 totalStEthPositionValue = _getStEthValueInUsdc();
+        uint256 totalStEthPositionValue = getStEthValueInUsdc();
 
         if (totalStEthPositionValue >= totalWethDebtInUsdc) {
             return totalUsdcHoldings + totalStEthPositionValue - totalWethDebtInUsdc;
@@ -425,6 +439,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         internal
         override
     {
+        caller; // Silence compiler warnings
         uint256 directBalance = usdc.balanceOf(address(this));
         if (assets > directBalance) {
             IMangroveGhostbook.ModuleData memory data;
@@ -505,12 +520,12 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         internal
     {
         uint256 initialBorrowCapacity = _calculateBorrowCapacityAave();
-        uint256 targetBorrowAmount = usdcAmount * targetLeverage / BASIS_POINTS;
+        uint256 usdcInWeth = usdcAmount * 1e30 / getEthPriceInUsdc();
+        uint256 targetBorrowAmount = usdcInWeth * targetLeverage / BASIS_POINTS;
         uint256 borrowedSoFar = 0;
 
         // Initial borrow from Aave
         uint256 initialBorrow = Math.min(initialBorrowCapacity, targetBorrowAmount);
-        uint256 initialBorrow = initialBorrowCapacity / 2;
         if (initialBorrow > 0) {
             aavePool.borrow(address(weth), initialBorrow, 2, 0, address(this));
             borrowedSoFar += initialBorrow;
@@ -523,16 +538,12 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         } else {
             stEthReceived = _optimalSwap(false, initialBorrow, tickSpacing, maxTick, moduleData);
         }
-
         // Start looping process
         for (uint256 i = 0; i < maxIterations && borrowedSoFar < targetBorrowAmount; i++) {
             // Supply stETH to Morpho as collateral
             morpho.supplyCollateral(_morphoMarketParams, stEthReceived, address(this), "");
-
             // Calculate borrow amount from Morpho
-            uint256 morphoBorrowAmount =
-                Math.min(_calculateBorrowCapacityMorpho(_morphoMarketParams), targetBorrowAmount - borrowedSoFar);
-
+            uint256 morphoBorrowAmount = Math.min(_calculateBorrowCapacityMorpho(), targetBorrowAmount - borrowedSoFar);
             if (morphoBorrowAmount == 0) break;
 
             // Borrow WETH from Morpho
@@ -548,9 +559,9 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
 
             // Swap new WETH to stETH for next iteration
             if (tickSpacing == 0) {
-                stEthReceived = _fastSwap(false, initialBorrow);
+                stEthReceived = _fastSwap(false, morphoBorrowAmount);
             } else {
-                stEthReceived = _optimalSwap(false, initialBorrow, tickSpacing, maxTick, moduleData);
+                stEthReceived = _optimalSwap(false, morphoBorrowAmount, tickSpacing, maxTick, moduleData);
             }
 
             emit LoopIteration(i + 1, borrowedSoFar, stEthReceived);
@@ -787,7 +798,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @return Value in USDC
     function _getUsdcValue() internal view returns (uint256) {
         // Get USDC supplied as collateral on Aave
-        (uint256 totalCollateralBase, uint256 totalDebtBase,,,,) = aavePool.getUserAccountData(address(this));
+        (uint256 totalCollateralBase,,,,,) = aavePool.getUserAccountData(address(this));
 
         // Add direct USDC balance held by the vault
         uint256 directUsdcBalance = usdc.balanceOf(address(this));
@@ -798,7 +809,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Returns the value of stETH held in USDC terms
     /// @dev Converts stETH value to USDC using price oracle
     /// @return Value in USDC
-    function _getStEthValueInUsdc() internal view returns (uint256) {
+    function getStEthValueInUsdc() public view returns (uint256) {
         // Get stETH balance from Morpho
         uint256 suppliedStEth = morpho.position(morphoMarketId, address(this)).collateral;
 
@@ -812,7 +823,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
 
         uint256 ethPriceInUsdc = getEthPriceInUsdc(); // Price of ETH in USDC
 
-        uint256 stEthValueInUsdc = (totalStEth * stEthPriceInEth * ethPriceInUsdc) / (1e18 * 1e18);
+        uint256 stEthValueInUsdc = (totalStEth * stEthPriceInEth * ethPriceInUsdc) / (1e18 * 1e18) / 1e12;
 
         return stEthValueInUsdc;
     }
@@ -820,33 +831,32 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @notice Returns the value of WETH debt in USDC terms
     /// @dev Converts WETH debt to USDC using price oracle
     /// @return Value in USDC
-    function _getWethDebtInUsdc() internal view returns (uint256) {
+    function getWethDebtInUsdc() public view returns (uint256) {
         // Get WETH debt from Aave
         uint256 aaveDebt = _getAaveDebt();
 
         // Get WETH debt from Morpho
         uint256 morphoDebt = morpho.expectedBorrowAssets(_morphoMarketParams, address(this));
-
         uint256 totalWethDebt = aaveDebt + morphoDebt;
 
-        // Get the price of ETH in terms of USDC
-        uint256 ethPriceInUsdc = getEthPriceInUsdc();
+        uint256 wethPrice = oracle.getAssetPrice(address(weth));
+        uint256 usdcPrice = oracle.getAssetPrice(address(usdc));
 
-        return (totalWethDebt * ethPriceInUsdc) / 1e18;
+        return (totalWethDebt * wethPrice / usdcPrice) / 1e12;
     }
 
     /// @notice Calculates the borrow capacity on Morpho
-    /// @param marketParams The Morpho market parameters
     /// @return Borrow capacity in WETH
-    function _calculateBorrowCapacityMorpho(MarketParams memory marketParams) internal view returns (uint256) {
+    function _calculateBorrowCapacityMorpho() internal view returns (uint256) {
         // Get stETH supplied as collateral to Morpho
-        uint256 suppliedStEth = morpho.expectedSupplyAssets(marketParams, address(this));
+        uint256 suppliedStEth = morpho.position(morphoMarketId, address(this)).collateral;
 
         // Apply the configurable LTV to determine borrow capacity
         // Convert stETH to WETH equivalent using the stETH/ETH exchange rate
         uint256 stEthPriceInEth = getStEthPriceInEth();
 
-        return (suppliedStEth * stEthPriceInEth * morphoLtv) / (1e18 * 100);
+        uint256 borrowableCapacityWeth = suppliedStEth * stEthPriceInEth * morphoLtv / (1e18 * 100);
+        return borrowableCapacityWeth;
     }
 
     /// @notice Calculates the borrow capacity on Aave
@@ -875,7 +885,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     /// @dev Queries Aave for the debt of this contract
     /// @return Debt amount in WETH
     function _getAaveDebt() internal view returns (uint256) {
-        uint256 wethDebtUsd = IERC20(aavePool.getReserveAToken(address(weth))).balanceOf(address(this));
+        (, uint256 wethDebtUsd,,,,) = aavePool.getUserAccountData(address(this));
         uint256 wethPrice = oracle.getAssetPrice(address(weth));
         uint256 wethDebtWeth = wethDebtUsd * 1e18 / wethPrice;
         return wethDebtWeth;
@@ -887,7 +897,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     function getEthPriceInUsdc() public view returns (uint256) {
         // Get the latest price from Chainlink
         (
-            uint80 roundId,
+            ,
             int256 price,
             /* uint startedAt */
             ,
@@ -914,7 +924,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
     function getStEthPriceInEth() public view returns (uint256) {
         // Get the latest price from Chainlink
         (
-            uint80 roundId,
+            ,
             int256 price,
             /* uint startedAt */
             ,

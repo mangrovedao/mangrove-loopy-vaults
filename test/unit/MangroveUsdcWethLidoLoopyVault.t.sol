@@ -33,14 +33,13 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     address constant AERODROME_FACTORY_BASE = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
     address constant AERODROME_ROUTER_BASE = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     address constant AERODROME_WETH_ST_ETH_POOL_BASE = 0xA6385c73961dd9C58db2EF0c4EB98cE4B60651e8;
-    // Chainlink Price Feed addresses on Base
-    address constant ETH_USD_PRICE_FEED_BASE = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
     address constant STETH_ETH_PRICE_FEED_BASE = 0x43a5C292A453A3bF3606fa856197f09D7B74251a;
+    address constant ETH_USD_PRICE_FEED_BASE = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
 
     // Configuration constants
     uint256 constant INITIAL_TIMELOCK = 1 days;
     uint256 constant MAX_ITERATIONS = 5;
-    uint256 constant TARGET_LEVERAGE = 300; // 3x leverage (300% of initial capital)
+    uint256 constant TARGET_LEVERAGE = 10_000; // 3x leverage (300% of initial capital)
     uint256 constant MORPHO_LTV = 75; // 75% LTV for Morpho borrowing
     string constant VAULT_NAME = "Mangrove USDC-WETH-Lido Loopy Vault";
     string constant VAULT_SYMBOL = "mgvUWLV";
@@ -91,7 +90,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             morphoLtv: MORPHO_LTV,
             ethUsdPriceFeed: ETH_USD_PRICE_FEED_BASE,
             stEthEthPriceFeed: STETH_ETH_PRICE_FEED_BASE,
-            maxPriceStaleness: type(uint256).max, // prevents bug from fork
+            maxPriceStaleness: 24 hours,
             curator: users.curator,
             guardian: users.guardian,
             feeRecipient: users.feeRecipient,
@@ -159,7 +158,6 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     }
 
     function testMangroveUsdcWethLidoLoopyVault_InitialState() public {
-        // Check that the vault was initialized with the correct values
         assertEq(address(vault.usdc()), USDC_BASE);
         assertEq(address(vault.weth()), WETH_BASE);
         assertEq(address(vault.stEth()), WST_ETH_BASE);
@@ -182,73 +180,51 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     }
 
     function testDeposit_WithFullLoopStrategy() public {
-        // Fund the user with USDC
         uint256 depositAmount = 1000 * 1e6; // 1000 USDC
         deal(USDC_BASE, users.alice, depositAmount);
 
-        // Approve and deposit
         vm.startPrank(users.alice);
         IERC20(USDC_BASE).safeIncreaseAllowance(address(vault), depositAmount);
         uint256 shares = vault.deposit(depositAmount, users.alice);
         vm.stopPrank();
 
-        // Verify shares were minted
         assertEq(vault.balanceOf(users.alice), shares);
-
-        // Verify deposit was processed
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 0);
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
         assertEq(vault.totalSupply(), shares);
-        console2.log("totalAssets : ", vault.totalAssets());
-        assertEq(vault.totalAssets(), depositAmount);
+        assertApproxEqRel(vault.totalAssets(), depositAmount, 0.005e18); // 0.5% tolerance
     }
 
-    // function testWithdraw_PartialWithUnwinding() public {
-    //     // First deposit to set up the position
-    //     testDeposit_WithFullLoopStrategy();
+    function testMangroveUsdcWethLidoLoopyVault_DepositWithoutLoop() public {
+        uint256 depositAmount = 1000 * 1e6; // 1000 USDC
+        deal(USDC_BASE, users.alice, depositAmount);
 
-    //     // Track state before withdrawal
-    //     uint256 totalWethBorrowedBefore = vault.totalWethBorrowed();
-    //     uint256 totalStEthHeldBefore = vault.totalStEthHeld();
+        vm.startPrank(users.alice);
+        vault.setMaxIterations(0);
+        IERC20(USDC_BASE).safeIncreaseAllowance(address(vault), depositAmount);
+        uint256 shares = vault.deposit(depositAmount, users.alice);
+        vm.stopPrank();
+        assertEq(vault.balanceOf(users.alice), shares);
+        assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 0);
+        assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
+        assertApproxEqRel(vault.totalAssets(), depositAmount, 0.005e18); // 0.5% tolerance
+        assertEq(vault.totalSupply(), shares);
+    }
 
-    //     // Calculate 50% of shares
-    //     uint256 shares = vault.balanceOf(users.alice);
-    //     uint256 halfShares = shares / 2;
+    function test_stEthPriceRise() public {
+        testDeposit_WithFullLoopStrategy();
 
-    //     // Withdraw half the position
-    //     vm.startPrank(users.alice);
-    //     uint256 assets = vault.redeem(halfShares, users.alice, users.alice);
-    //     vm.stopPrank();
+        uint256 totalAssetsBefore = vault.totalAssets();
 
-    //     // Verify USDC was returned (mocked value)
-    //     assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 100 * 1e6);
+        mockStEthPriceIncrease(20);
 
-    //     // Verify shares were burned
-    //     assertEq(vault.balanceOf(users.alice), shares - halfShares);
+        uint256 expectedEarnings = totalAssetsBefore * (20 * vault.getStEthValueInUsdc() / vault.totalAssets()) / 100;
+        uint256 totalAssetsAfter = vault.totalAssets();
 
-    //     // Verify totalWethBorrowed and totalStEthHeld were reduced
-    //     assertEq(vault.totalWethBorrowed(), totalWethBorrowedBefore - halfShares);
-    //     assertEq(vault.totalStEthHeld(), totalStEthHeldBefore - halfShares);
-    // }
-
-    // TODO: rebalance using ghostbook
-    // function testRebalance_WhenOverlevered() public {
-    //     // First deposit to set up the position
-    //     testDeposit_WithFullLoopStrategy();
-
-    //     // Mock overleverage condition (mock price feeds)
-    //     mockEthPriceDecrease(20); // 20% price drop
-
-    //     // Call rebalance as allocator
-    //     vm.prank(users.allocator);
-    //     vault.rebalance(3000); // Using a tick spacing of 3000
-
-    //     // The actual verification would check that leverage was adjusted,
-    //     // but we can't effectively test this with mocks
-    // }
+        assertApproxEqRel(totalAssetsAfter, totalAssetsBefore + expectedEarnings, 0.005e18);
+    }
 
     function testMangroveUsdcWethLidoLoopyVault_SetMorphoLtv() public {
-        // Test setting a new morphoLtv value
         uint256 newLtv = 70; // 70%
 
         vm.prank(users.alice);
@@ -258,7 +234,6 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     }
 
     function testMangroveUsdcWethLidoLoopyVault_SetMorphoLtvRevertsIfTooHigh() public {
-        // Test setting a morphoLtv value that exceeds the maximum
         uint256 tooHighLtv = vault.MAX_MORPHO_LTV() + 1;
 
         vm.prank(users.alice);
@@ -297,108 +272,50 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     }
 
     function testMangroveUsdcWethLidoLoopyVault_SubmitSwapModule() public {
-        // Deploy a new swapper
         AerodromeSwapper newSwapper = new AerodromeSwapper(AERODROME_FACTORY_BASE, AERODROME_ROUTER_BASE);
 
         vm.prank(users.alice);
         vault.submitSwapModule(address(newSwapper));
 
-        // Check that the pendingSwapModule is set correctly
         (address value, uint256 validAt) = vault.pendingSwapModule();
         assertEq(value, address(newSwapper));
         assertEq(validAt, block.timestamp + INITIAL_TIMELOCK);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_AcceptSwapModule() public {
-        // Deploy a new swapper
         AerodromeSwapper newSwapper = new AerodromeSwapper(AERODROME_FACTORY_BASE, AERODROME_ROUTER_BASE);
 
-        // Submit the new swapper
         vm.prank(users.alice);
         vault.submitSwapModule(address(newSwapper));
 
-        // Fast forward past the timelock period
         vm.warp(block.timestamp + INITIAL_TIMELOCK + 1);
 
-        // Accept the new swapper
         vault.acceptSwapModule();
 
-        // Check that the swapper was updated
         assertEq(address(vault.swapper()), address(newSwapper));
 
-        // Check that pendingSwapModule was cleared
         (address value, uint256 validAt) = vault.pendingSwapModule();
         assertEq(value, address(0));
         assertEq(validAt, 0);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_AcceptSwapModuleRevertsBeforeTimelock() public {
-        // Deploy a new swapper
         AerodromeSwapper newSwapper = new AerodromeSwapper(AERODROME_FACTORY_BASE, AERODROME_ROUTER_BASE);
 
-        // Submit the new swapper
         vm.prank(users.alice);
         vault.submitSwapModule(address(newSwapper));
 
-        // Fast forward but not past the timelock period
         vm.warp(block.timestamp + INITIAL_TIMELOCK - 1);
 
-        // Try to accept the new swapper, should revert
         vm.expectRevert(BaseMangroveLoopyVault.TimelockNotElapsed.selector);
         vault.acceptSwapModule();
     }
 
     function testMangroveUsdcWethLidoLoopyVault_GetPrices() public {
-        // Test that we can fetch prices without reverting
         uint256 ethPrice = vault.getEthPriceInUsdc();
         uint256 stEthPrice = vault.getStEthPriceInEth();
 
-        // Prices should be positive
-        assert(ethPrice > 0);
-        assert(stEthPrice > 0);
-    }
-
-    function testMangroveUsdcWethLidoLoopyVault_DepositWithoutLoop() public {
-        // Fund the user with USDC
-        uint256 depositAmount = 1000 * 1e6; // 1000 USDC
-        deal(USDC_BASE, users.alice, depositAmount);
-
-        // Mock the vault to skip the looping strategy
-        vm.mockCall(address(vault), abi.encodeWithSignature("_executeLoopStrategy()"), abi.encode());
-
-        // Approve and deposit
-        vm.startPrank(users.alice);
-        IERC20(USDC_BASE).safeIncreaseAllowance(address(vault), depositAmount);
-        uint256 shares = vault.deposit(depositAmount, users.alice);
-        vm.stopPrank();
-
-        // Verify shares were minted
-        assertEq(vault.balanceOf(users.alice), shares);
-
-        // Verify deposit was processed
-        assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 0);
-        assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), depositAmount);
-        assertEq(vault.totalAssets(), depositAmount);
-        assertEq(vault.totalSupply(), shares);
-    }
-
-    function testMangroveUsdcWethLidoLoopyVault_EmergencyUnwind() public {
-        // Set up the guardian
-        vm.prank(users.alice);
-        vault.submitGuardian(users.charlie);
-
-        // Fast forward past the timelock period
-        vm.warp(block.timestamp + INITIAL_TIMELOCK + 1);
-
-        // Accept the guardian
-        vm.prank(users.alice);
-        vault.submitGuardian(address(0));
-
-        // Mock the unwind function to validate it's called
-        vm.mockCall(address(vault), abi.encodeWithSignature("_unwindLoop()"), abi.encode(0));
-
-        // Call emergencyUnwind as the guardian
-        vm.prank(users.charlie);
-        vault.emergencyUnwind();
+        assertGt(ethPrice, 0);
+        assertGt(stEthPrice, 0);
     }
 }

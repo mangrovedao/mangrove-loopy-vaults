@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.19;
 
 import { IERC20, SafeERC20 } from "@openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 import { IAerodromeRouter } from "src/interfaces/IAerodromeRouter.sol";
@@ -18,7 +18,6 @@ contract AerodromeSwapper {
     function swap(address tokenIn, address tokenOut, uint256 amountIn) external returns (uint256 amountOut) {
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
-        address pool = router.poolFor(tokenIn, tokenOut, false, factory);
         IERC20(tokenIn).safeIncreaseAllowance(address(router), amountIn);
 
         IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
@@ -38,7 +37,6 @@ contract AerodromeSwapper {
         view
         returns (uint256 amountOut)
     {
-        address pool = router.poolFor(tokenIn, tokenOut, false, factory);
         IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
         routes[0] = IAerodromeRouter.Route({ from: tokenIn, to: tokenOut, stable: false, factory: factory });
         return router.getAmountsOut(amountIn, routes)[1];
