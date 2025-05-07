@@ -7,6 +7,7 @@ import { IERC20, SafeERC20 } from "@openzeppelin-contracts/token/ERC20/utils/Saf
 import { Math } from "@openzeppelin-contracts/utils/math/Math.sol";
 
 import { IMorpho, Id, MarketParams } from "morpho-org-morpho-blue/src/interfaces/IMorpho.sol";
+import { IMorphoFlashLoanCallback } from "morpho-org-morpho-blue/src/interfaces/IMorphoCallbacks.sol";
 import { MarketParamsLib } from "morpho-org-morpho-blue/src/libraries/MarketParamsLib.sol";
 import { MorphoBalancesLib } from "morpho-org-morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import { MorphoLib } from "morpho-org-morpho-blue/src/libraries/periphery/MorphoLib.sol";
@@ -268,6 +269,7 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         weth.forceApprove(params.swapper, type(uint256).max);
         weth.forceApprove(params.aavePool, type(uint256).max);
         stEth.forceApprove(params.morpho, type(uint256).max);
+        weth.forceApprove(params.morpho, type(uint256).max);
         stEth.forceApprove(params.swapper, type(uint256).max);
     }
 
@@ -440,11 +442,8 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         override
     {
         caller; // Silence compiler warnings
-        uint256 directBalance = usdc.balanceOf(address(this));
-        if (assets > directBalance) {
-            IMangroveGhostbook.ModuleData memory data;
-            assets = _unwindLoopAsNeeded(assets - directBalance, 0, IMangroveGhostbook.Tick.wrap(0), data);
-        }
+        IMangroveGhostbook.ModuleData memory data;
+        assets = _unwindLoopAsNeeded(assets, 0, IMangroveGhostbook.Tick.wrap(0), data);
         super._withdraw(_msgSender(), receiver, owner, assets, shares);
     }
 
@@ -581,23 +580,6 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         return _unwindLoopAsNeeded(totalAssets(), 0, IMangroveGhostbook.Tick.wrap(0), data);
     }
 
-    // usdc balance :
-    // supply 10 usdc como colateral AAVE
-    // borrow 1 weth (5 usdc) AAVE
-    // swapeo a  1 steth(5 usdc)
-    // supply en morpho de 1 steth (5 usdc) MORPHO
-    // borrow de 0.5 weth (2.5 usdc) MORPHO
-    // swapeo a 0.5 steth (2.5 usdc)
-    // supply en morpho de 0.5 steth (2.5 usdc) MORPHO
-    // borrow de 0.25 weth (1.25 usdc) MORPHO
-    // swapeo a 0.25 steth (1.25 usdc)
-
-    // total collateral usdc: 10 usdc
-    // total deuda weth : 1 eth(5 usdc) + 0.5 weth(2.5 usdc) + 0.25 weth(1.25 usdc) = 8.75 usdc
-    // total steth : 1 steth + 0.5 steth + 0.25 steth = 1.75 steth
-
-    // totalAssets = 10 usdc + surplus
-
     /// @notice Unwinds only as much of the loop as needed to free up a specific amount of assets
     /// @param assetsNeeded Amount of assets (USDC) needed
     function _unwindLoopAsNeeded(
@@ -623,137 +605,17 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         // Calculate partial unwind ratio
         uint256 unwindRatio = additionalUsdcNeeded * BASIS_POINTS / netPositionValue;
 
-        // Handle Morpho operations
-        MorphoUnwindParams memory params = _handleMorphoUnwind(
-            MorphoUnwindParams({
-                unwindRatio: unwindRatio,
-                assetsNeeded: assetsNeeded,
-                additionalUsdcNeeded: additionalUsdcNeeded,
-                tickSpacing: tickSpacing,
-                maxTick: maxTick,
-                moduleData: moduleData
-            })
-        );
-        unwindRatio = params.unwindRatio;
-        assetsNeeded = params.assetsNeeded;
-        additionalUsdcNeeded = params.additionalUsdcNeeded;
+        uint256 wethToRepay = _calculateMorphoRepayAmount(unwindRatio);
 
-        // Handle Aave operations
-        _handleAaveUnwind(unwindRatio, additionalUsdcNeeded);
+        morpho.flashLoan(address(weth), wethToRepay, abi.encode(tickSpacing, maxTick, moduleData));
 
-        return assetsNeeded;
+        return usdc.balanceOf(address(this));
     }
 
-    struct MorphoUnwindParams {
-        uint256 unwindRatio;
-        uint256 assetsNeeded;
-        uint256 additionalUsdcNeeded;
-        uint256 tickSpacing;
-        IMangroveGhostbook.Tick maxTick;
-        IMangroveGhostbook.ModuleData moduleData;
-    }
-
-    function _handleMorphoUnwind(MorphoUnwindParams memory params) internal returns (MorphoUnwindParams memory) {
-        MarketParams memory marketParams = morpho.idToMarketParams(morphoMarketId);
-
-        // Handle debt repayment
-        params = _repayMorphoDebt(params, marketParams);
-
-        // Withdraw stETH from Morpho
-        _withdrawStEthFromMorpho(params.unwindRatio, marketParams);
-
-        return params;
-    }
-
-    function _repayMorphoDebt(
-        MorphoUnwindParams memory params,
-        MarketParams memory marketParams
-    )
-        internal
-        returns (MorphoUnwindParams memory)
-    {
-        // Calculate debt and repay amount
-        RepayData memory data = _calculateMorphoRepayAmount(params.unwindRatio);
-        if (data.morphoDebt == 0 || data.morphoRepayAmount == 0) {
-            return params;
-        }
-
-        // Handle swap if needed and adjust ratios
-        (params, data.morphoRepayAmount) = _handleSwapForRepay(params, data.morphoRepayAmount);
-
-        // Execute repayment
-        morpho.repay(marketParams, data.morphoRepayAmount, 0, address(this), "");
-        return params;
-    }
-
-    struct RepayData {
-        uint256 morphoDebt;
-        uint256 morphoRepayAmount;
-    }
-
-    function _calculateMorphoRepayAmount(uint256 unwindRatio) internal view returns (RepayData memory data) {
-        data.morphoDebt = morpho.expectedBorrowAssets(_morphoMarketParams, address(this));
-        data.morphoRepayAmount = data.morphoDebt * unwindRatio / BASIS_POINTS;
-        return data;
-    }
-
-    function _handleSwapForRepay(
-        MorphoUnwindParams memory params,
-        uint256 morphoRepayAmount
-    )
-        internal
-        returns (MorphoUnwindParams memory, uint256)
-    {
-        uint256 wethBalance = weth.balanceOf(address(this));
-        if (wethBalance >= morphoRepayAmount) {
-            return (params, morphoRepayAmount);
-        }
-
-        uint256 stEthToSwap = morphoRepayAmount - wethBalance;
-        uint256 morphoRepayAmountBefore = morphoRepayAmount;
-
-        uint256 swapLosses;
-        if (params.tickSpacing == 0) {
-            swapLosses = _fastSwap(true, stEthToSwap);
-        } else {
-            swapLosses = _optimalSwap(true, stEthToSwap, params.tickSpacing, params.maxTick, params.moduleData);
-        }
-
-        morphoRepayAmount -= swapLosses;
-
-        // Adjust requested values based on swap losses
-        if (morphoRepayAmount > 0 && morphoRepayAmountBefore > morphoRepayAmount) {
-            uint256 ratio = morphoRepayAmountBefore / morphoRepayAmount;
-            params.assetsNeeded = params.assetsNeeded * ratio;
-            params.additionalUsdcNeeded = params.additionalUsdcNeeded * ratio;
-            params.unwindRatio = params.unwindRatio * ratio;
-        }
-
-        return (params, morphoRepayAmount);
-    }
-
-    function _withdrawStEthFromMorpho(uint256 unwindRatio, MarketParams memory marketParams) internal {
-        uint256 morphoStEth = morpho.expectedSupplyAssets(marketParams, address(this));
-        if (morphoStEth > 0) {
-            uint256 stEthToWithdraw = morphoStEth * unwindRatio / BASIS_POINTS;
-            if (stEthToWithdraw > 0) {
-                morpho.withdraw(marketParams, stEthToWithdraw, 0, address(this), address(this));
-            }
-        }
-    }
-
-    function _handleAaveUnwind(uint256 unwindRatio, uint256 additionalUsdcNeeded) internal {
-        // Repay Aave debt
-        uint256 aaveDebt = _getAaveDebt();
-        if (aaveDebt > 0) {
-            uint256 aaveRepayAmount = aaveDebt * unwindRatio / BASIS_POINTS;
-            if (aaveRepayAmount > 0) {
-                aavePool.repay(address(weth), aaveRepayAmount, 2, address(this));
-            }
-        }
-
-        // Withdraw needed USDC from Aave
-        aavePool.withdraw(address(usdc), additionalUsdcNeeded, address(this));
+    function _calculateMorphoRepayAmount(uint256 unwindRatio) internal view returns (uint256) {
+        uint256 morphoDebt = morpho.expectedBorrowAssets(_morphoMarketParams, address(this));
+        uint256 morphoRepayAmount = morphoDebt * unwindRatio / BASIS_POINTS;
+        return morphoRepayAmount;
     }
 
     function _fastSwap(bool stEthToWeth, uint256 amountIn) internal returns (uint256 losses) {
@@ -942,5 +804,30 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault {
         uint256 stEthPriceInEth = uint256(price);
 
         return stEthPriceInEth;
+    }
+
+    function onMorphoFlashLoan(uint256 borrowedWeth, bytes calldata data) external {
+        (
+            uint256 tickSpacing,
+            IMangroveGhostbook.Tick maxTick,
+            IMangroveGhostbook.ModuleData memory moduleData
+        ) = abi.decode(data, (uint256, IMangroveGhostbook.Tick, IMangroveGhostbook.ModuleData));
+
+        morpho.repay(_morphoMarketParams, borrowedWeth, 0, address(this), "");
+        uint256 morphoCollateralWithdraw = borrowedWeth * 1e18 / getStEthPriceInEth();
+
+        morpho.withdrawCollateral(_morphoMarketParams, morphoCollateralWithdraw, address(this), address(this));
+        uint256 balanceBefore = weth.balanceOf(address(this));
+        if (IMangroveGhostbook.Tick.unwrap(maxTick) == 0) {
+            _fastSwap(true, morphoCollateralWithdraw);
+        } else {
+            _optimalSwap(true, morphoCollateralWithdraw, tickSpacing, maxTick, moduleData);
+        }
+
+        uint256 gotWeth = weth.balanceOf(address(this)) - balanceBefore;
+        uint256 aaveRepayAmount = gotWeth - borrowedWeth;
+        aavePool.repay(address(weth), aaveRepayAmount, 2, address(this));
+        uint256 aaveRepayUsdcAmount = aaveRepayAmount * getEthPriceInUsdc() / 1e18;
+        aavePool.withdraw(address(usdc), aaveRepayUsdcAmount, address(this));
     }
 }

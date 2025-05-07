@@ -211,7 +211,22 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(vault.totalSupply(), shares);
     }
 
-    function test_stEthPriceRise() public {
+    function testMangroveUsdcWethLidoLoopyVault_WithdrawFullLoopStrategy() public {
+        testDeposit_WithFullLoopStrategy();
+
+        uint256 shares = vault.balanceOf(users.alice);
+
+        vm.startPrank(users.alice);
+        vault.redeem(shares / 10, users.alice, users.alice);
+        vm.stopPrank();
+
+        assertEq(vault.balanceOf(users.alice), 0);
+        assertEq(IERC20(USDC_BASE).balanceOf(users.alice), vault.totalAssets());
+        assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
+        assertEq(vault.totalSupply(), 0);
+    }
+
+    function estMangroveUsdcWethLidoLoopyVault_stEthPriceRise() public {
         testDeposit_WithFullLoopStrategy();
 
         uint256 totalAssetsBefore = vault.totalAssets();
