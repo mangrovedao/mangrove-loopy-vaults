@@ -39,7 +39,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     // Configuration constants
     uint256 constant INITIAL_TIMELOCK = 1 days;
     uint256 constant MAX_ITERATIONS = 5;
-    uint256 constant TARGET_LEVERAGE = 10_000; // 3x leverage (300% of initial capital)
+    uint256 constant TARGET_LEVERAGE = 30_000; // 3x leverage (300% of initial capital)
     uint256 constant MORPHO_LTV = 75; // 75% LTV for Morpho borrowing
     string constant VAULT_NAME = "Mangrove USDC-WETH-Lido Loopy Vault";
     string constant VAULT_SYMBOL = "mgvUWLV";
@@ -193,6 +193,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
         assertEq(vault.totalSupply(), shares);
         assertApproxEqRel(vault.totalAssets(), depositAmount, 0.005e18); // 0.5% tolerance
+        assertGt(vault.currentLeverageFactor(), 10_000);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_DepositWithoutLoop() public {
@@ -211,22 +212,67 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(vault.totalSupply(), shares);
     }
 
-    function testMangroveUsdcWethLidoLoopyVault_WithdrawFullLoopStrategy() public {
+    function testMangroveUsdcWethLidoLoopyVault_RedeemPartial() public {
+        testDeposit_WithFullLoopStrategy();
+
+        uint256 initialSharse = vault.balanceOf(users.alice);
+        uint256 sharesToRedeem = initialSharse / 10;
+        uint256 assetsToWithdraw = vault.convertToAssets(sharesToRedeem);
+        uint256 totalAssets = vault.totalAssets();
+        uint256 aliceBalance = IERC20(USDC_BASE).balanceOf(users.alice);
+
+        vm.startPrank(users.alice);
+        uint256 assets = vault.redeem(sharesToRedeem, users.alice, users.alice);
+        assertApproxEq(assets, totalAssets / 10, totalAssets / 100);
+        vm.stopPrank();
+
+        assertEq(vault.balanceOf(users.alice), initialSharse - sharesToRedeem);
+        assertEq(IERC20(USDC_BASE).balanceOf(users.alice), aliceBalance + assets);
+        assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
+        assertEq(vault.totalSupply(), initialSharse - sharesToRedeem);
+        assertApproxEq(vault.totalAssets(), totalAssets - assets, assets / 100);
+    }
+
+    function testMangroveUsdcWethLidoLoopyVault_RedeemFullLoopStrategy() public {
         testDeposit_WithFullLoopStrategy();
 
         uint256 shares = vault.balanceOf(users.alice);
+        uint256 totalAssets = vault.totalAssets();
+        uint256 aliceBalance = IERC20(USDC_BASE).balanceOf(users.alice);
 
         vm.startPrank(users.alice);
-        vault.redeem(shares / 10, users.alice, users.alice);
+        uint256 assets = vault.redeem(shares, users.alice, users.alice);
+        assertApproxEq(assets, totalAssets, totalAssets / 100);
         vm.stopPrank();
 
         assertEq(vault.balanceOf(users.alice), 0);
-        assertEq(IERC20(USDC_BASE).balanceOf(users.alice), vault.totalAssets());
+        assertEq(IERC20(USDC_BASE).balanceOf(users.alice), aliceBalance + assets);
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
         assertEq(vault.totalSupply(), 0);
+        assertApproxEq(vault.totalAssets(),0, 2e6);
     }
 
-    function estMangroveUsdcWethLidoLoopyVault_stEthPriceRise() public {
+    function testMangroveUsdcWethLidoLoopyVault_RebalanceOptimalSwap() public {
+        vault.setMaxIterations(0);
+        testDeposit_WithFullLoopStrategy();
+        
+        vm.prank(users.alice);
+        // TODO: custom swap data using ghostbook
+    }   
+
+    function testMangroveUsdcWethLidoLoopyVault_EmergencyUnwind() public {
+        testDeposit_WithFullLoopStrategy();
+        uint256 totalAssetsBefore = vault.totalAssets();
+
+        vm.prank(users.alice);
+        vault.emergencyUnwind();
+
+        uint256 totalAssetsAfter = vault.totalAssets();
+
+        assertApproxEqRel(totalAssetsAfter, totalAssetsBefore, 0.005e18);
+    }
+
+    function testMangroveUsdcWethLidoLoopyVault_stEthPriceRise() public {
         testDeposit_WithFullLoopStrategy();
 
         uint256 totalAssetsBefore = vault.totalAssets();
