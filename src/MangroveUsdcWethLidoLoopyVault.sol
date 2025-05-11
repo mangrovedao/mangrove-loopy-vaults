@@ -638,7 +638,9 @@ contract MangroveUsdcWethLidoLoopyVault is BaseMangroveLoopyVault, IMorphoFlashL
         uint256 tickSpacing,
         IMangroveGhostbook.Tick maxTick,
         IMangroveGhostbook.ModuleData memory moduleData
-    ) private {
+    )
+        private
+    {
         uint256 wethToRepayAave = _calculateAaveRepayAmount(unwindRatio);
         uint256 wethToRepayMorpho = _calculateMorphoRepayAmount(unwindRatio);
         uint256 stEthToWithdrawMorpho = _getMorphoCollateral() * unwindRatio / BASIS_POINTS;

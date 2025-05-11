@@ -249,16 +249,16 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), aliceBalance + assets);
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
         assertEq(vault.totalSupply(), 0);
-        assertApproxEq(vault.totalAssets(),0, 2e6);
+        assertApproxEq(vault.totalAssets(), 0, 2e6);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_RebalanceOptimalSwap() public {
         vault.setMaxIterations(0);
         testDeposit_WithFullLoopStrategy();
-        
+
         vm.prank(users.alice);
         // TODO: custom swap data using ghostbook
-    }   
+    }
 
     function testMangroveUsdcWethLidoLoopyVault_EmergencyUnwind() public {
         testDeposit_WithFullLoopStrategy();
