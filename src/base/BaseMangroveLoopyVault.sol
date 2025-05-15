@@ -536,7 +536,6 @@ abstract contract BaseMangroveLoopyVault is ERC4626, ERC20Permit, Ownable {
     function _accrueFee() internal returns (uint256 newTotalAssets) {
         uint256 feeShares;
         (feeShares, newTotalAssets) = _accruedFeeShares();
-
         if (feeShares != 0) _mint(feeRecipient, feeShares);
 
         emit AccrueInterest(newTotalAssets, feeShares);

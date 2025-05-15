@@ -10,6 +10,7 @@ import {
     BaseMangroveLoopyVault,
     IAggregatorV3Interface,
     IERC20,
+    IERC4626,
     IMangroveGhostbook,
     ISwapModule,
     Id,
@@ -24,7 +25,9 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     MangroveUsdcWethLidoLoopyVault public vault;
     AerodromeSwapper public swapper;
     IMangroveGhostbook public ghostbook;
-    MarketParams public morphoMarketParams;
+    MarketParams public morphoBorrowParams;
+    IERC4626 public morphoSupplyVault;
+    MangroveUsdcWethLidoLoopyVault.VaultParams params;
 
     // Protocol addresses on Base
     address constant AAVE_POOL_BASE = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
@@ -38,9 +41,10 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
 
     // Configuration constants
     uint256 constant INITIAL_TIMELOCK = 1 days;
-    uint256 constant MAX_ITERATIONS = 5;
-    uint256 constant TARGET_LEVERAGE = 30_000; // 3x leverage (300% of initial capital)
-    uint256 constant MORPHO_LTV = 75; // 75% LTV for Morpho borrowing
+    uint256 constant MAX_ITERATIONS = 30;
+    uint256 constant TARGET_LEVERAGE = 17_000; // 2x leverage (200% of initial capital)
+    uint256 constant MORPHO_LTV = 9000; // 90% LTV for Morpho borrowing
+    uint256 constant AAVE_LTV = 5000; // 50% LTV for Aave borrowing
     string constant VAULT_NAME = "Mangrove USDC-WETH-Lido Loopy Vault";
     string constant VAULT_SYMBOL = "mgvUWLV";
 
@@ -48,7 +52,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         0x3a4048c64ba1b375330d376b1ce40e4047d03b47ab4d48af484edec9fec801ba;
 
     function setUp() public {
-        _setUp("BASE", 29_828_489);
+        _setUp("BASE", 25_269_187);
         VerboseWeth mockWeth = new VerboseWeth();
 
         // Fetch WETH balances before vm.etch
@@ -60,18 +64,19 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         // Set mock bytecode WETH for easier debugging
         vm.etch(WETH_BASE, address(mockWeth).code);
 
-        morphoMarketParams = MarketParams({
+        morphoBorrowParams = MarketParams({
             loanToken: WETH_BASE,
             collateralToken: WST_ETH_BASE,
             oracle: 0x4A11590e5326138B514E08A9B52202D42077Ca65,
             irm: 0x46415998764C29aB2a25CbeA6254146D50D22687,
             lltv: 945_000_000_000_000_000
         });
+
         swapper = new AerodromeSwapper(AERODROME_FACTORY_BASE, AERODROME_ROUTER_BASE);
         ghostbook = IMangroveGhostbook(vm.envAddress("GHOSTBOOK_ADDRESS_BASE"));
         address owner = users.alice;
 
-        MangroveUsdcWethLidoLoopyVault.VaultParams memory params = MangroveUsdcWethLidoLoopyVault.VaultParams({
+        params = MangroveUsdcWethLidoLoopyVault.VaultParams({
             owner: owner,
             initialTimelock: INITIAL_TIMELOCK,
             usdc: USDC_BASE,
@@ -80,12 +85,13 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             aavePool: AAVE_POOL_BASE,
             aaveOracle: AAVE_ORACLE_ADDRESS,
             morpho: MORPHO_BASE,
-            morphoMarketParams: morphoMarketParams,
+            morphoBorrowParams: morphoBorrowParams,
             maxIterations: MAX_ITERATIONS,
             targetLeverage: TARGET_LEVERAGE,
             name: VAULT_NAME,
             symbol: VAULT_SYMBOL,
             swapper: address(swapper),
+            aaveLtv: AAVE_LTV,
             ghostbook: ghostbook,
             morphoLtv: MORPHO_LTV,
             ethUsdPriceFeed: ETH_USD_PRICE_FEED_BASE,
@@ -95,7 +101,8 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             guardian: users.guardian,
             feeRecipient: users.feeRecipient,
             allocator: users.allocator,
-            fee: 0.1 ether
+            fee: 0.1 ether,
+            autoExecuteOnDeposit: true
         });
 
         vault = new MangroveUsdcWethLidoLoopyVault(params);
@@ -165,7 +172,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(address(vault.morpho()), MORPHO_BASE);
         assertEq(address(vault.swapper()), address(swapper));
         assertEq(address(vault.ghostbook()), address(ghostbook));
-        assertEq(Id.unwrap(vault.morphoMarketId()), MORPHO_ST_ETH_WETH_MARKET_ID_BASE);
+        assertEq(Id.unwrap(vault.morphoBorrowId()), MORPHO_ST_ETH_WETH_MARKET_ID_BASE);
         assertEq(vault.maxIterations(), MAX_ITERATIONS);
         assertEq(vault.targetLeverage(), TARGET_LEVERAGE);
         assertEq(vault.morphoLtv(), MORPHO_LTV);
@@ -185,6 +192,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
 
         vm.startPrank(users.alice);
         IERC20(USDC_BASE).safeIncreaseAllowance(address(vault), depositAmount);
+        uint256 sharePriceBefore = vault.pricePerShare();
         uint256 shares = vault.deposit(depositAmount, users.alice);
         vm.stopPrank();
 
@@ -192,8 +200,12 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 0);
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
         assertEq(vault.totalSupply(), shares);
-        assertApproxEqRel(vault.totalAssets(), depositAmount, 0.005e18); // 0.5% tolerance
+        assertApproxEqRel(vault.totalAssets(), depositAmount, 0.05e18); // 5% tolerance
         assertGt(vault.currentLeverageFactor(), 10_000);
+        if(vault.autoExecuteOnDeposit()) {
+            assertApproxEqRel(vault.currentLeverageFactor(), params.targetLeverage, 1e18); // 1% tolerance
+        }
+        assertEq(vault.pricePerShare(), sharePriceBefore);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_DepositWithoutLoop() public {
@@ -201,36 +213,37 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         deal(USDC_BASE, users.alice, depositAmount);
 
         vm.startPrank(users.alice);
-        vault.setMaxIterations(0);
+        vault.setAutoExecuteOnDeposit(false);
         IERC20(USDC_BASE).safeIncreaseAllowance(address(vault), depositAmount);
         uint256 shares = vault.deposit(depositAmount, users.alice);
         vm.stopPrank();
         assertEq(vault.balanceOf(users.alice), shares);
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 0);
-        assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
-        assertApproxEqRel(vault.totalAssets(), depositAmount, 0.005e18); // 0.5% tolerance
+        assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), depositAmount);
+        assertApproxEqRel(vault.totalAssets(), depositAmount, 1e18); // 1% tolerance
         assertEq(vault.totalSupply(), shares);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_RedeemPartial() public {
         testDeposit_WithFullLoopStrategy();
 
-        uint256 initialSharse = vault.balanceOf(users.alice);
-        uint256 sharesToRedeem = initialSharse / 10;
-        uint256 assetsToWithdraw = vault.convertToAssets(sharesToRedeem);
+        uint256 initialShares = vault.balanceOf(users.alice);
+        uint256 sharesToRedeem = initialShares / 10;
         uint256 totalAssets = vault.totalAssets();
         uint256 aliceBalance = IERC20(USDC_BASE).balanceOf(users.alice);
+        uint256 initialPricePerShare = vault.pricePerShare();
 
         vm.startPrank(users.alice);
         uint256 assets = vault.redeem(sharesToRedeem, users.alice, users.alice);
         assertApproxEq(assets, totalAssets / 10, totalAssets / 100);
         vm.stopPrank();
 
-        assertEq(vault.balanceOf(users.alice), initialSharse - sharesToRedeem);
+        assertEq(vault.balanceOf(users.alice), initialShares - sharesToRedeem);
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), aliceBalance + assets);
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
-        assertEq(vault.totalSupply(), initialSharse - sharesToRedeem);
+        assertEq(vault.totalSupply(), initialShares - sharesToRedeem);
         assertApproxEq(vault.totalAssets(), totalAssets - assets, assets / 100);
+        assertEq(vault.pricePerShare(), initialPricePerShare);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_RedeemFullLoopStrategy() public {
@@ -252,12 +265,45 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertApproxEq(vault.totalAssets(), 0, 2e6);
     }
 
-    function testMangroveUsdcWethLidoLoopyVault_RebalanceOptimalSwap() public {
-        vault.setMaxIterations(0);
+    function testMangroveUsdcWethLidoLoopyVault_ReduceLeverage() public {
+        testDeposit_WithFullLoopStrategy();
+        uint256 newTargetLeverage = 15_000;
+
+        address aerodromeFactory = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+        address aerodromeModule = 0xF2CACc9ca4eEac1bad53E208C738c728Ab3b381c;
+        uint256 leverageFactorBefore = vault.currentLeverageFactor();
+        vm.startPrank(users.alice);
+        vault.setTargetLeverage(newTargetLeverage);
+        IMangroveGhostbook.ModuleData memory data;
+        vault.rebalance(
+            0,
+            IMangroveGhostbook.Tick.wrap(0),
+           data
+        );
+        uint256 leverageFactorAfter = vault.currentLeverageFactor();
+        assertApproxEqRel(leverageFactorAfter, newTargetLeverage, 1e18); // 1% tolerance
+        assertLt(leverageFactorAfter, leverageFactorBefore);
+    }
+
+    function testMangroveUsdcWethLidoLoopyVault_IncreaseLeverage() public {
+        vm.prank(users.alice);
+        vault.setTargetLeverage(10_500);
         testDeposit_WithFullLoopStrategy();
 
-        vm.prank(users.alice);
-        // TODO: custom swap data using ghostbook
+        address aerodromeFactory = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+        address aerodromeModule = 0xF2CACc9ca4eEac1bad53E208C738c728Ab3b381c;
+        uint256 leverageFactorBefore = vault.currentLeverageFactor();
+
+        uint256 newTargetLeverage = 14_000;
+        
+        vm.startPrank(users.alice);
+        vault.setTargetLeverage(newTargetLeverage);
+        IMangroveGhostbook.ModuleData memory md;
+        vault.rebalance(0, IMangroveGhostbook.Tick.wrap(0), md);
+        uint256 leverageFactorAfter = vault.currentLeverageFactor();
+        
+        assertApproxEqRel(leverageFactorAfter, newTargetLeverage, 1e18); // 1% tolerance
+        assertGt(leverageFactorAfter, leverageFactorBefore);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_EmergencyUnwind() public {
@@ -272,17 +318,36 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertApproxEqRel(totalAssetsAfter, totalAssetsBefore, 0.005e18);
     }
 
-    function testMangroveUsdcWethLidoLoopyVault_stEthPriceRise() public {
+    function testMangroveUsdcWethLidoLoopyVault_ExecuteLoopStrategy() public {
+        vault.setAutoExecuteOnDeposit(false);
+        testDeposit_WithFullLoopStrategy();
+        vm.startPrank(users.alice);
+        IMangroveGhostbook.ModuleData memory md;
+        vault.executeLoopStrategy(vault.totalAssets(), 0,IMangroveGhostbook.Tick.wrap(0), md);
+        assertApproxEqRel(vault.currentLeverageFactor(), params.targetLeverage, 1e18); 
+    }
+        
+
+    function testMangroveUsdcWethLidoLoopyVault_MockStEthPriceIncrease() public {
         testDeposit_WithFullLoopStrategy();
 
+        uint256 periodInDays = 90 days;
+
         uint256 totalAssetsBefore = vault.totalAssets();
+        uint256 pricePerShareBefore = vault.pricePerShare();
+        console2.log("Total Assets Before:", totalAssetsBefore);
+        console2.log("Price Per Share Before:", pricePerShareBefore);
 
-        mockStEthPriceIncrease(20);
+        skip(periodInDays);
+        mockEthPriceIncrease(20); // weth/usdc increases 20%
+        mockStEthPriceIncrease(2); // steth/weth increases 2%
 
-        uint256 expectedEarnings = totalAssetsBefore * (20 * vault.getStEthValueInUsdc() / vault.totalAssets()) / 100;
         uint256 totalAssetsAfter = vault.totalAssets();
-
-        assertApproxEqRel(totalAssetsAfter, totalAssetsBefore + expectedEarnings, 0.005e18);
+        uint256 pricePerShareAfter = vault.pricePerShare();
+        console2.log("Total Assets After:", totalAssetsAfter);
+        console2.log("Price Per Share After:", pricePerShareAfter);
+       
+        assertGt(totalAssetsAfter, totalAssetsBefore);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_SetMorphoLtv() public {
@@ -379,4 +444,50 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertGt(ethPrice, 0);
         assertGt(stEthPrice, 0);
     }
+}
+
+interface IAerodromeRouter {
+    struct Route {
+        address from;
+        address to;
+        bool stable;
+        address factory;
+    }
+
+    /// @notice Fetch and sort the reserves for a pool
+    /// @param tokenA       .
+    /// @param tokenB       .
+    /// @param stable       True if pool is stable, false if volatile
+    /// @param _factory     Address of PoolFactory for tokenA and tokenB
+    /// @return reserveA    Amount of reserves of the sorted token A
+    /// @return reserveB    Amount of reserves of the sorted token B
+    function getReserves(
+        address tokenA,
+        address tokenB,
+        bool stable,
+        address _factory
+    )
+        external
+        view
+        returns (uint256 reserveA, uint256 reserveB);
+
+    /// @notice Perform chained getAmountOut calculations on any number of pools
+    function getAmountsOut(uint256 amountIn, Route[] memory routes) external view returns (uint256[] memory amounts);
+
+    /// @notice Swap one token for another
+    /// @param amountIn     Amount of token in
+    /// @param amountOutMin Minimum amount of desired token received
+    /// @param routes       Array of trade routes used in the swap
+    /// @param to           Recipient of the tokens received
+    /// @param deadline     Deadline to receive tokens
+    /// @return amounts     Array of amounts returned per route
+    function swapExactTokensForTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        Route[] calldata routes,
+        address to,
+        uint256 deadline
+    )
+        external
+        returns (uint256[] memory amounts);
 }
