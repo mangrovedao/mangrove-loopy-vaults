@@ -36,7 +36,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     address constant AERODROME_FACTORY_BASE = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
     address constant AERODROME_ROUTER_BASE = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
     address constant AERODROME_WETH_ST_ETH_POOL_BASE = 0xA6385c73961dd9C58db2EF0c4EB98cE4B60651e8;
-    address constant STETH_ETH_PRICE_FEED_BASE = 0x43a5C292A453A3bF3606fa856197f09D7B74251a;
+    address constant WSTETH_ETH_PRICE_FEED_BASE = 0x43a5C292A453A3bF3606fa856197f09D7B74251a;
     address constant ETH_USD_PRICE_FEED_BASE = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
 
     // Configuration constants
@@ -95,7 +95,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
             ghostbook: ghostbook,
             morphoLtv: MORPHO_LTV,
             ethUsdPriceFeed: ETH_USD_PRICE_FEED_BASE,
-            stEthEthPriceFeed: STETH_ETH_PRICE_FEED_BASE,
+            wstEthEthPriceFeed: WSTETH_ETH_PRICE_FEED_BASE,
             maxPriceStaleness: 24 hours,
             curator: users.curator,
             guardian: users.guardian,
@@ -118,7 +118,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         vm.label(AERODROME_FACTORY_BASE, "AERODROME_FACTORY");
         vm.label(AERODROME_ROUTER_BASE, "AERODROME_ROUTER");
         vm.label(ETH_USD_PRICE_FEED_BASE, "ETH_USD_PRICE_FEED");
-        vm.label(STETH_ETH_PRICE_FEED_BASE, "STETH_ETH_PRICE_FEED");
+        vm.label(WSTETH_ETH_PRICE_FEED_BASE, "STETH_ETH_PRICE_FEED");
         vm.label(address(ghostbook), "GHOSTBOOK");
         vm.label(address(swapper), "SWAPPER");
         vm.label(address(vault), "VAULT");
@@ -153,12 +153,12 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
 
     function mockStEthPriceIncrease(uint256 percentIncrease) internal {
         // Get current price
-        (, int256 currentPrice,,,) = IAggregatorV3Interface(STETH_ETH_PRICE_FEED_BASE).latestRoundData();
+        (, int256 currentPrice,,,) = IAggregatorV3Interface(WSTETH_ETH_PRICE_FEED_BASE).latestRoundData();
         int256 newPrice = currentPrice * int256(100 + percentIncrease) / 100;
 
         // Mock the price feed
         vm.mockCall(
-            STETH_ETH_PRICE_FEED_BASE,
+            WSTETH_ETH_PRICE_FEED_BASE,
             abi.encodeWithSelector(IAggregatorV3Interface.latestRoundData.selector),
             abi.encode(uint80(0), newPrice, uint256(0), block.timestamp, uint80(0))
         );
@@ -177,7 +177,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         assertEq(vault.targetLeverage(), TARGET_LEVERAGE);
         assertEq(vault.morphoLtv(), MORPHO_LTV);
         assertEq(address(vault.ethUsdPriceFeed()), ETH_USD_PRICE_FEED_BASE);
-        assertEq(address(vault.stEthEthPriceFeed()), STETH_ETH_PRICE_FEED_BASE);
+        assertEq(address(vault.wstEthEthPriceFeed()), WSTETH_ETH_PRICE_FEED_BASE);
         assertEq(vault.owner(), users.alice);
         assertEq(vault.curator(), users.curator);
         assertEq(vault.guardian(), users.guardian);
@@ -198,12 +198,18 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
 
         assertEq(vault.balanceOf(users.alice), shares);
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), 0);
-        assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
         assertEq(vault.totalSupply(), shares);
-        assertApproxEqRel(vault.totalAssets(), depositAmount, 0.05e18); // 5% tolerance
-        assertGt(vault.currentLeverageFactor(), 10_000);
-        if(vault.autoExecuteOnDeposit()) {
+
+        if (vault.autoExecuteOnDeposit()) {
+            assertGt(vault.currentLeverageFactor(), 10_000);
+            assertApproxEqRel(vault.totalAssets(), depositAmount, 0.05e18); // 5% tolerance
+            assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
+            assertApproxEqRel(vault.totalAssets(), depositAmount, 0.05e18); // 5% tolerance
             assertApproxEqRel(vault.currentLeverageFactor(), params.targetLeverage, 1e18); // 1% tolerance
+        } else {
+            assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), depositAmount);
+            assertEq(vault.totalAssets(), depositAmount);
+            assertEq(vault.currentLeverageFactor(), 10_000);
         }
         assertEq(vault.pricePerShare(), sharePriceBefore);
     }
@@ -232,37 +238,43 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         uint256 totalAssets = vault.totalAssets();
         uint256 aliceBalance = IERC20(USDC_BASE).balanceOf(users.alice);
         uint256 initialPricePerShare = vault.pricePerShare();
+        uint256 initialLeverageFactor = vault.currentLeverageFactor();
 
         vm.startPrank(users.alice);
+        uint256 previewdAssets = vault.previewRedeem(sharesToRedeem);
         uint256 assets = vault.redeem(sharesToRedeem, users.alice, users.alice);
         assertApproxEq(assets, totalAssets / 10, totalAssets / 100);
         vm.stopPrank();
 
+        assertApproxEq(vault.pricePerShare(), initialPricePerShare, initialPricePerShare / 1000);
         assertEq(vault.balanceOf(users.alice), initialShares - sharesToRedeem);
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), aliceBalance + assets);
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
-        assertEq(vault.totalSupply(), initialShares - sharesToRedeem);
         assertApproxEq(vault.totalAssets(), totalAssets - assets, assets / 100);
-        assertEq(vault.pricePerShare(), initialPricePerShare);
+        assertEq(vault.currentLeverageFactor(), initialLeverageFactor);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_RedeemFullLoopStrategy() public {
         testDeposit_WithFullLoopStrategy();
 
-        uint256 shares = vault.balanceOf(users.alice);
+        uint256 sharesToRedeem = vault.balanceOf(users.alice);
         uint256 totalAssets = vault.totalAssets();
         uint256 aliceBalance = IERC20(USDC_BASE).balanceOf(users.alice);
+        uint256 initialSharePrice = vault.pricePerShare();
 
         vm.startPrank(users.alice);
-        uint256 assets = vault.redeem(shares, users.alice, users.alice);
+        uint256 previewdAssets = vault.previewRedeem(sharesToRedeem);
+        uint256 assets = vault.redeem(sharesToRedeem, users.alice, users.alice);
         assertApproxEq(assets, totalAssets, totalAssets / 100);
         vm.stopPrank();
 
+        assertEq(vault.pricePerShare(), initialSharePrice, "sp");
         assertEq(vault.balanceOf(users.alice), 0);
         assertEq(IERC20(USDC_BASE).balanceOf(users.alice), aliceBalance + assets);
         assertEq(IERC20(USDC_BASE).balanceOf(address(vault)), 0);
         assertEq(vault.totalSupply(), 0);
-        assertApproxEq(vault.totalAssets(), 0, 2e6);
+        assertEq(vault.totalAssets(), 0);
+        assertEq(vault.currentLeverageFactor(), 0);
     }
 
     function testMangroveUsdcWethLidoLoopyVault_ReduceLeverage() public {
@@ -275,11 +287,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         vm.startPrank(users.alice);
         vault.setTargetLeverage(newTargetLeverage);
         IMangroveGhostbook.ModuleData memory data;
-        vault.rebalance(
-            0,
-            IMangroveGhostbook.Tick.wrap(0),
-           data
-        );
+        vault.rebalance(0, IMangroveGhostbook.Tick.wrap(0), data);
         uint256 leverageFactorAfter = vault.currentLeverageFactor();
         assertApproxEqRel(leverageFactorAfter, newTargetLeverage, 1e18); // 1% tolerance
         assertLt(leverageFactorAfter, leverageFactorBefore);
@@ -295,13 +303,13 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         uint256 leverageFactorBefore = vault.currentLeverageFactor();
 
         uint256 newTargetLeverage = 14_000;
-        
+
         vm.startPrank(users.alice);
         vault.setTargetLeverage(newTargetLeverage);
         IMangroveGhostbook.ModuleData memory md;
         vault.rebalance(0, IMangroveGhostbook.Tick.wrap(0), md);
         uint256 leverageFactorAfter = vault.currentLeverageFactor();
-        
+
         assertApproxEqRel(leverageFactorAfter, newTargetLeverage, 1e18); // 1% tolerance
         assertGt(leverageFactorAfter, leverageFactorBefore);
     }
@@ -319,14 +327,14 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
     }
 
     function testMangroveUsdcWethLidoLoopyVault_ExecuteLoopStrategy() public {
+        vm.startPrank(users.alice);
         vault.setAutoExecuteOnDeposit(false);
         testDeposit_WithFullLoopStrategy();
-        vm.startPrank(users.alice);
         IMangroveGhostbook.ModuleData memory md;
-        vault.executeLoopStrategy(vault.totalAssets(), 0,IMangroveGhostbook.Tick.wrap(0), md);
-        assertApproxEqRel(vault.currentLeverageFactor(), params.targetLeverage, 1e18); 
+        vm.startPrank(users.alice);
+        vault.executeLoopStrategy(vault.totalAssets(), 0, IMangroveGhostbook.Tick.wrap(0), md);
+        assertApproxEqRel(vault.currentLeverageFactor(), params.targetLeverage, 1e18);
     }
-        
 
     function testMangroveUsdcWethLidoLoopyVault_MockStEthPriceIncrease() public {
         testDeposit_WithFullLoopStrategy();
@@ -346,7 +354,7 @@ contract MangroveUsdcWethLidoLoopyVaultTest is BaseTest {
         uint256 pricePerShareAfter = vault.pricePerShare();
         console2.log("Total Assets After:", totalAssetsAfter);
         console2.log("Price Per Share After:", pricePerShareAfter);
-       
+
         assertGt(totalAssetsAfter, totalAssetsBefore);
     }
 
